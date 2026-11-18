@@ -1,0 +1,161 @@
+# D13 web servers, D14 databases, D15 mail. Log locations are read from each service's configuration; logs already
+# copied from /var/log (D12-001) are listed, not copied twice.
+@phase 1200
+[D13-001] COPY kit 300
+cmd: -R /etc/nginx /usr/local/nginx/conf /usr/local/openresty/nginx/conf /opt/nginx/conf /etc/apache2 /etc/httpd /usr/local/apache2/conf /etc/lighttpd /etc/caddy /etc/haproxy /etc/traefik /etc/varnish /etc/squid /etc/tomcat* /usr/share/tomcat*/conf /opt/tomcat*/conf /etc/php /etc/php.ini /etc/php.d /etc/php-fpm.conf /etc/php-fpm.d /etc/opt/remi /etc/modsecurity /etc/letsencrypt /etc/uwsgi /etc/gunicorn.d
+purpose: Web server, proxy, PHP and TLS configuration (nginx, Apache, lighttpd, Caddy, HAProxy, Traefik, Varnish, Squid, Tomcat, PHP-FPM, ModSecurity, Let's Encrypt).
+expect: Main config, include folders, sites-available/enabled, conf.d, mods, PHP pools.
+empty: Only installed servers.
+value: Added vhosts, proxy rules, PHP auto_prepend_file backdoors, disabled WAF rules.
+sensitive: yes
+ref: draft-36.1
+
+[D13-002] FUNC server 120
+cmd: web_effective_config
+out: effective-config
+req: has nginx || has apache2ctl || has apachectl || has httpd
+purpose: Effective configuration as the server sees it: nginx -T, apachectl -S/-M/-t -D DUMP_INCLUDES.
+expect: Full merged config, vhost map, loaded modules.
+empty: Not applicable without nginx/Apache.
+value: Includes outside /etc and the real document roots.
+ref: draft-36.1
+
+[D13-003] FUNC kit 1800
+cmd: web_logs_from_config
+out: logs-from-config
+purpose: Parse access_log/error_log/CustomLog/ErrorLog/TransferLog from web server configs and copy logs located outside /var/log.
+expect: found.tsv (directive, path, size) and copies of logs outside /var/log.
+empty: EMPTY when all logs are already under /var/log (copied by D12-001).
+value: Per-vhost logs in custom locations are often the only record of web attacks.
+ref: draft-36.1
+
+[D13-004] FUNC kit 3600
+cmd: webroot_inventory
+out: webroot
+purpose: For every document root (from configs and /var/www, /srv/www, /usr/share/nginx/html): list + hash all files, copy scripts changed within --since days, all scripts in upload folders, credential files (.env, wp-config.php, config.php), .htaccess files.
+expect: webroot/inventory.tsv and copies.
+empty: EMPTY without web roots.
+value: Webshells, injected code, recently modified PHP/JSP files.
+sensitive: yes
+ref: draft-36.1; draft-13.6
+
+[D13-005] COPY kit 1800
+cmd: -R /var/lib/php/sessions /var/lib/php5 /var/lib/php/session /tmp/sess_*
+purpose: PHP session files (listing and content).
+expect: sess_* files.
+empty: NOT_FOUND when sessions are stored elsewhere.
+value: Attacker session IDs, data stored in sessions.
+sensitive: yes
+ref: draft-36.1
+
+[D13-006] FUNC kit 600
+cmd: tomcat_inventory
+out: tomcat
+req: ls -d /etc/tomcat* /opt/tomcat* /usr/share/tomcat* /var/lib/tomcat* >/dev/null 2>&1
+purpose: Tomcat webapps list with hashes, recently deployed WAR files, catalina.out and access logs outside /var/log.
+expect: webapps listing and logs.
+empty: Not applicable without Tomcat.
+value: Malicious WAR deployed through the manager app.
+ref: draft-36.1
+
+@phase 1250
+[D14-001] COPY kit 600
+cmd: -R /etc/mysql /etc/my.cnf /etc/my.cnf.d /etc/mariadb /etc/postgresql /var/lib/pgsql/data/*.conf /var/lib/pgsql/*/data/*.conf /var/lib/postgresql/*/main/*.conf /etc/redis /etc/redis.conf /etc/mongod.conf /etc/mongodb.conf /etc/elasticsearch /etc/opensearch /etc/cassandra /etc/clickhouse-server /etc/influxdb /etc/couchdb /etc/memcached.conf /etc/sysconfig/memcached /etc/rabbitmq /etc/kafka /etc/neo4j
+purpose: Database configuration files (MySQL/MariaDB, PostgreSQL incl. pg_hba.conf, Redis, MongoDB, Elasticsearch/OpenSearch, Cassandra, ClickHouse, InfluxDB, CouchDB, memcached, RabbitMQ, Kafka, Neo4j).
+expect: Config files of the databases installed.
+empty: Only installed databases.
+value: Remote access opened (bind-address 0.0.0.0, trust in pg_hba), log/audit settings, Redis without password.
+sensitive: yes
+ref: draft-36.2
+
+[D14-002] FUNC kit 7200
+cmd: db_logs
+out: db-logs
+purpose: Locate and copy database logs from their configs: MySQL error/general/slow/audit logs and binary logs, PostgreSQL log_directory and pgAudit, Redis log, MongoDB log/audit, Elasticsearch logs; record whether general/audit logging was ON.
+expect: db-logs/<engine>/... copies and logging-settings.txt.
+empty: EMPTY without databases.
+value: Logins, failed logins, queries (when logged), data changes in binlogs/WAL.
+sensitive: yes
+ref: draft-36.2
+
+[D14-003] FUNC kit 14400
+cmd: db_change_logs
+out: db-change-logs
+opt: DBBINLOG
+purpose: Copy MySQL/MariaDB binary and relay logs (data change history).
+expect: binlog.* / mysql-bin.* files and the index file.
+empty: EMPTY when binary logging is off.
+value: Every data change with its time (deleted records, inserted admin users).
+sensitive: yes
+ref: draft-36.2; draft-36.4
+
+[D14-004] FUNC kit 14400
+cmd: db_wal
+out: db-wal
+opt: DBWAL
+purpose: Copy PostgreSQL WAL segments (pg_wal/pg_xlog).
+expect: WAL segment files.
+empty: EMPTY without PostgreSQL.
+value: Recent data changes can be decoded offline (pg_waldump).
+sensitive: yes
+ref: draft-36.2; draft-36.4
+
+[D14-005] FUNC kit 14400
+cmd: db_data_files
+out: db-data
+opt: DBDATA
+purpose: Copy Redis AOF/RDB files, SQLite databases found in web roots and /opt, and list (name, size, hash) the data folders of other engines.
+expect: Copies and data-folder listings.
+empty: EMPTY without databases.
+value: Redis AOF contains every write command (CONFIG SET dir/dbfilename = classic Redis-to-shell attack).
+sensitive: yes
+ref: draft-36.2
+
+[D14-006] FUNC kit 120
+cmd: db_client_files
+out: db-client-files
+purpose: Database client history and credential files of every user (.mysql_history, .psql_history, .rediscli_history, .dbshell, .mongosh, .my.cnf, .pgpass).
+expect: Copies per user.
+empty: EMPTY when none exist.
+value: Queries run by an attacker; stored credentials.
+sensitive: yes
+ref: draft-36.2
+
+@phase 1300
+[D15-001] COPY kit 600
+cmd: -R /etc/postfix /etc/exim /etc/exim4 /etc/sendmail.cf /etc/mail /etc/dovecot /etc/opendkim /etc/aliases /etc/mailname /etc/ssmtp /etc/msmtprc /etc/nullmailer
+purpose: Mail server configuration (Postfix, Exim, Sendmail, Dovecot, DKIM, aliases, relays).
+expect: main.cf/master.cf, exim configs, aliases.
+empty: Only installed mail software.
+value: Open relay settings, aliases piping mail to commands, forwarding of mail to attackers.
+sensitive: yes
+ref: draft-13.7
+
+[D15-002] COPY kit 3600
+cmd: -R /var/mail /var/spool/mail /var/spool/postfix /var/spool/exim /var/spool/exim4 /var/spool/mqueue /var/spool/clientmqueue
+purpose: Local mailboxes and mail queues (system and cron mails).
+expect: Mailbox files, queue files.
+empty: Often empty on servers.
+value: Cron output mailed to root reveals failing malware jobs; queued spam shows abuse.
+sensitive: yes
+ref: draft-13.7
+
+[D15-003] CMD server 60
+cmd: srv mailq 2>&1 | head -n 5000
+out: mailq.txt
+req: has mailq
+purpose: Mail queue summary.
+expect: 'Mail queue is empty' or queued messages.
+empty: Not applicable without an MTA.
+value: Spam campaigns sent from the compromised host.
+ref: draft-13.7
+
+[D15-004] FUNC kit 120
+cmd: user_mail_forward
+out: user-forwarding
+purpose: ~/.forward, ~/.procmailrc, ~/.mailrc, ~/.muttrc of every user.
+expect: Copies per user.
+empty: EMPTY when none exist.
+value: Mail forwarding or piping to programs set by an attacker.
+sensitive: yes
+ref: draft-13.7

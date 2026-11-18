@@ -1,0 +1,21 @@
+# downloaded inputs and build outputs (fetch.sh / build scripts recreate them)
+/src/
+/bin-official/
+/tools/
+/build/out/
+/build/work-*/
+/build/logs/
+/build/snap/
+/build/zig-cache/
+/helpers/out/
+/helpers/logs/
+/kit/C0F-KIT/
+/kit/extract/
+/kit/assemble.log
+/kit/7zip-License.txt
+/release/
+/testruns/distro/
+__pycache__/
+*.pyc
+/tmp-*/
+/demo/rec-*/

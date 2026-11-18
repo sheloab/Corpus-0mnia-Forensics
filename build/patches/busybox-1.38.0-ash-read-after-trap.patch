@@ -1,0 +1,18 @@
+--- a/shell/ash.c
++++ b/shell/ash.c
+@@ -14660,8 +14660,14 @@
+ 		/* To get SIGCHLD: sleep 1 & read x; echo $x
+ 		 * Correct behavior is to not exit "read"
+ 		 */
+-		if (pending_sig == 0)
++		if (pending_sig == 0) {
++			/* The signal was already handled (trap ran). Clear the
++			 * "got a signal" flag, else poll() in shell_builtin_read
++			 * keeps failing with EINTR and "read" loops forever.
++			 */
++			bb_got_signal = 0;
+ 			goto again;
++		}
+ 	}
+ 
+ 	if ((uintptr_t)r == 2) /* -t SEC timeout? */

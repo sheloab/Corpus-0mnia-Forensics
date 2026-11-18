@@ -1,0 +1,14 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT OR GPL-2.0-or-later
+# Copyright (c) 2026 Corpus-0mnia Forensics (C0F) authors
+# C0F launcher: find a BusyBox from this kit that runs on this machine, then start c0f.sh with it.
+# Uses only shell built-ins, so it works on a minimal system. If this host has no /bin/sh at all, run:
+#   ./bin/x86_64/busybox sh ./c0f.sh      (or bin/aarch64, bin/armv7)
+case "$0" in */*) K=${0%/*};; *) K=.;; esac
+for A in x86_64 aarch64 armv7; do
+  B="$K/bin/$A/busybox"
+  if [ -f "$B" ] && "$B" true >/dev/null 2>&1; then exec "$B" sh "$K/c0f.sh" --arch "$A" "$@"; fi
+done
+echo "[C0F] ERROR: no kit BusyBox can run on this machine (supported: x86_64, aarch64, armv7)." >&2
+echo "[C0F] Check that the kit is not on a noexec mount and that the CPU architecture is supported." >&2
+exit 3

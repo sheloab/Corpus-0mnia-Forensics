@@ -1,0 +1,150 @@
+# D20 virtualization, D21 cloud agents, D22 security tools, D23 kernel/rootkit checks
+@phase 1800
+[D20-001] FUNC server 600
+cmd: virt_collect
+out: hypervisors
+req: has virsh || has qm || has pct || has VBoxManage || [ -d /etc/libvirt ] || [ -d /etc/pve ]
+purpose: Virtual machines hosted here: libvirt (virsh list --all, dominfo, dumpxml, net-list), Proxmox (qm/pct list and config, pveversion, pvecm status, pvesm status, pveum user list), VirtualBox (list vms).
+expect: Lists and per-VM configs.
+empty: Not applicable on hosts without a hypervisor.
+value: Hidden or unknown VMs, VM snapshots, rogue cluster members.
+ref: draft-20.2; UAC:qm; UAC:pct
+
+[D20-002] COPY kit 600
+cmd: -R /etc/libvirt /var/log/libvirt /etc/pve /var/log/pve /var/lib/vz/template /etc/vmware /var/log/vmware
+purpose: Hypervisor configuration and logs (libvirt, Proxmox, VMware).
+expect: Domain XMLs, Proxmox cluster config, VM logs.
+empty: Not applicable without a hypervisor.
+value: VM creation/start history; Proxmox users and API tokens.
+sensitive: yes
+ref: draft-20.2
+
+@phase 1900
+[D21-001] COPY kit 600
+cmd: -R /var/lib/cloud /etc/cloud /var/log/cloud-init.log /var/log/cloud-init-output.log /var/lib/amazon /var/log/amazon /etc/amazon /var/lib/waagent /var/log/waagent.log /etc/waagent.conf /var/lib/google /etc/default/instance_configs.cfg /var/log/google* /etc/oci-hostname.conf /var/lib/hcloud /etc/qemu-ga /var/log/qemu-ga
+purpose: Cloud-init and cloud agents (AWS SSM, Azure waagent, Google guest agent, Oracle, Hetzner, qemu guest agent) state and logs.
+expect: Instance id, user-data, agent logs.
+empty: NOT_FOUND on non-cloud hosts.
+value: Commands executed through the cloud control plane (SSM RunCommand, Azure Run Command); instance identity without querying the metadata service.
+sensitive: yes
+ref: draft-21; UAC:aws_ssm_agent; UAC:azure_vm_agent
+
+[D21-002] FUNC kit 60
+cmd: cloud_identity
+out: cloud-identity.txt
+purpose: Cloud provider, instance id, region and image from local files only (no metadata service calls).
+expect: Provider and identifiers or 'not a cloud instance'.
+empty: Never empty.
+value: Needed to request provider-side logs (CloudTrail, activity logs, VPC flow logs).
+ref: draft-14.4; draft-20.3
+
+@phase 2000
+[D22-001] FUNC mixed 900
+cmd: security_agents
+out: agents
+purpose: Detect EDR/AV/HIDS agents and copy their status and logs: CrowdStrike (falconctl), Microsoft Defender (mdatp), SentinelOne, Sophos, Trend, Wazuh/OSSEC, osquery, ClamAV, Monarx, Elastic agent, Qualys, Tanium, Rapid7.
+expect: agents/<product>/... and agents/found.txt.
+empty: EMPTY when no agent is installed.
+value: Agent detections and quarantine; whether protection was disabled before the incident.
+sensitive: yes
+ref: UAC:falconctl; UAC:mdatp; draft-14.8
+
+[D22-002] COPY kit 1800
+cmd: -R /var/ossec/logs /var/ossec/queue/diff /var/log/clamav /var/lib/clamav/*.dat /var/log/osquery /etc/osquery /var/lib/aide /etc/aide /etc/aide.conf /var/log/aide /etc/tripwire /var/lib/tripwire /var/lib/samhain /etc/samhainrc /var/log/rkhunter.log /etc/rkhunter.conf /var/log/chkrootkit /var/log/lynis.log /var/log/lynis-report.dat
+purpose: HIDS/AV/integrity tool data: Wazuh/OSSEC logs, ClamAV logs, osquery, AIDE/Tripwire/Samhain databases and reports, rkhunter/chkrootkit/Lynis reports.
+expect: Logs and integrity databases.
+empty: NOT_FOUND when none is installed.
+value: Earlier detections and a baseline of file hashes to compare against now.
+sensitive: yes
+ref: draft-14.8
+
+@phase 2100
+[D23-001] CMD kit 30
+cmd: echo "tainted=$(cat /proc/sys/kernel/tainted)"; echo "modules_disabled=$(cat /proc/sys/kernel/modules_disabled 2>/dev/null)"; echo "lockdown=$(cat /sys/kernel/security/lockdown 2>/dev/null)"; echo "kptr_restrict=$(cat /proc/sys/kernel/kptr_restrict)"; echo "unprivileged_bpf_disabled=$(cat /proc/sys/kernel/unprivileged_bpf_disabled 2>/dev/null)"; ls /sys/firmware/efi >/dev/null 2>&1 && echo uefi=yes || echo uefi=no; for f in /sys/firmware/efi/efivars/SecureBoot-*; do [ -f "$f" ] && echo "secureboot=$(od -An -t u1 -j 4 -N 1 "$f" | tr -d ' ')"; done; cat /sys/kernel/security/ima/policy 2>/dev/null | head -n 50; ls /sys/kernel/security 2>/dev/null
+out: kernel-security-state.txt
+purpose: Kernel taint flags, module loading lock, lockdown, Secure Boot, IMA/EVM, BPF restrictions.
+expect: tainted=0 on a clean stock kernel; secureboot=1 when enabled.
+empty: Never empty.
+value: Tainted kernel (unsigned/out-of-tree module = possible rootkit), Secure Boot off.
+ref: draft-20.2; draft-14.5
+
+[D23-002] CMD kit 30
+cmd: echo '== /proc/modules'; cat /proc/modules; echo; echo '== lsmod'; lsmod 2>&1; echo; echo '== /sys/module (all, incl. built-in)'; ls /sys/module
+out: modules.txt
+purpose: Loaded kernel modules from three sources.
+expect: Same modules in /proc/modules and lsmod; /sys/module also lists built-ins.
+empty: Never empty.
+value: A module in /sys/module with sections but missing from /proc/modules = hidden module.
+ref: draft-3; SANS-FOR577
+
+[D23-003] FUNC kit 300
+cmd: module_details
+out: module-details.tsv
+purpose: Per loaded module: modinfo fields, file path, SHA-256, signer, taint flags, whether the file belongs to the running kernel tree.
+expect: TSV row per module.
+empty: Never empty.
+value: Unsigned or out-of-tree modules, modules loaded from unusual paths.
+ref: UAC:modinfo
+
+[D23-004] FUNC kit 120
+cmd: hidden_module_check
+out: hidden-modules.txt
+purpose: Compare /proc/modules, /sys/module/*/sections and kernel symbol owners in /proc/kallsyms.
+expect: 'no differences' or modules visible only in some sources.
+empty: Never empty.
+value: Kernel rootkits often unlink themselves from the module list but leave traces in sysfs/kallsyms.
+ref: draft-23.4; SANS-FOR577
+
+[D23-005] FUNC mixed 300
+cmd: ebpf_tracing
+out: ebpf-tracing
+purpose: eBPF programs/maps/links (bpftool when present, otherwise /proc/*/fdinfo of bpf fds and /sys/fs/bpf pins), kprobes/uprobes/ftrace state from tracefs, kallsyms hash.
+expect: Program lists (systemd and EDR use eBPF legitimately) and tracing state.
+empty: EMPTY lists are normal on minimal hosts.
+value: Modern rootkits (ebpfkit, BPFDoor-like) hide in eBPF and kprobes.
+ref: draft-14.5
+
+[D23-006] FUNC kit 600
+cmd: cross_check_processes
+out: cross-check-processes.txt
+purpose: Compare process lists: /proc readdir, PID brute force (kill -0 / stat /proc/<pid> up to max PID), kit ps, server ps.
+expect: 'no differences' or PIDs visible to only some methods.
+empty: Never empty.
+value: Userland or kernel rootkits hiding processes.
+ref: draft-19.5; draft-30.4
+
+[D23-007] FUNC kit 300
+cmd: cross_check_network
+out: cross-check-network.txt
+purpose: Compare listening/connected sockets from /proc/net/*, kit ss, kit netstat and the server's ss/netstat.
+expect: 'no differences' (short-lived connections may differ).
+empty: Never empty.
+value: Hidden ports/connections reveal rootkits or replaced binaries.
+ref: draft-19.5
+
+[D23-008] FUNC kit 600
+cmd: cross_check_files
+out: cross-check-files.txt
+purpose: Compare directory listings of key folders (/etc, /usr/bin, /usr/sbin, /tmp, /dev/shm, /lib/modules) made by kit ls, kit find, getdents through BusyBox, and the server's ls.
+expect: 'no differences'.
+empty: Never empty.
+value: File hiding by LD_PRELOAD or kernel hooks.
+ref: draft-19.5
+
+[D23-009] FUNC kit 1800
+cmd: run_chkrootkit
+out: chkrootkit
+purpose: chkrootkit 0.58b (Debian patches) with the kit's tools only, expert output, plus its helpers chkproc, chkdirs, ifpromisc, chkutmp, chkwtmp, chklastlog (rebuilt for the glibc login record layout).
+expect: chkrootkit/chkrootkit.txt with 'not infected'/'not found' lines; any INFECTED or suspicious lines need analyst review.
+empty: Never empty.
+value: Known rootkit signatures and generic checks; results are hints, false positives occur.
+ref: draft-26.1; http://www.chkrootkit.org/
+
+[D23-010] FUNC kit 120
+cmd: kernel_logs_now
+out: kernel-messages.txt
+purpose: Kernel ring buffer with ISO timestamps (dmesg) and the kernel command line.
+expect: Boot messages, module loads, segfaults, USB events.
+empty: dmesg_restrict may hide it from non-root (C0F runs as root).
+value: Module loads, crashes of exploited services, USB devices plugged in.
+ref: draft-3

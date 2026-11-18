@@ -1,0 +1,803 @@
+# SPDX-License-Identifier: MIT OR GPL-2.0-or-later
+# Copyright (c) 2026 Corpus-0mnia Forensics (C0F) authors
+#
+# Corpus-0mnia Forensics (C0F) - Linux live-response evidence collector
+# Version: @@VERSION@@
+#
+# Start it with the launcher:   sudo ./c0f            (picks the right kit BusyBox for this CPU)
+# or directly:                  sudo ./bin/<arch>/busybox sh ./c0f.sh
+# Help:                         ./c0f --help
+#
+# This script is written for the BusyBox ash shell shipped in the kit. Every tool it runs comes from
+# the kit (bin/<arch>/) unless an artefact only exists when that software is installed on the server
+# (systemctl, rpm, dpkg, ...): those are called through "srv" and recorded as UNTRUSTED_TOOL.
+# What is collected is defined in catalog.tsv (one row per artefact); README.txt is generated from it.
+# A failing command never stops the collection: it is recorded with a status and a reason.
+
+C0F_VERSION="@@VERSION@@"
+TAB='	'
+NL='
+'
+
+# ------------------------------------------------------------------------------------------------
+# 0. Bootstrap: kit location, architecture, minimal environment
+# ------------------------------------------------------------------------------------------------
+case "$0" in */*) KIT=${0%/*};; *) KIT=.;; esac
+KIT=$(cd "$KIT" 2>/dev/null && pwd -P) || { echo "[C0F] ERROR: cannot resolve kit folder" >&2; exit 3; }
+ARCH=""
+ORIG_ARGS="$*"
+
+usage() {
+cat <<'USAGE'
+Corpus-0mnia Forensics (C0F) - Linux live-response evidence collector
+
+Usage: sudo ./c0f [options]
+
+Collection control
+  --out DIR                 output folder (default: <kit folder>/<HOSTNAME>)
+  --work DIR                working folder (default: inside the output folder)
+  --case ID                 case / ticket number (asked if not given)
+  --examiner NAME           examiner name (asked if not given)
+  --yes                     do not ask questions (requires --case and --examiner)
+  --since DAYS              "recently changed" window for summaries (default 30)
+  --password TEXT           archive password (default: short hostname)
+  --password-prompt         ask for the archive password
+  --pcap-seconds N          packet capture length (default 60)
+  --kubeconfig FILE         extra kubeconfig for cluster-level Kubernetes collection
+
+Turn off large or intrusive parts (all ON by default)
+  --no-ram  --no-swap  --no-pcap  --no-timeline  --no-e2image  --no-container-export
+  --no-db-binlogs  --no-db-wal  --no-db-data  --no-process-dumps  --no-screenshot  --no-clipboard
+
+Other
+  --dry-run                 show what would be collected, collect nothing
+  --self-test               verify the kit and test every kit tool on this host, then exit
+  --force-untrusted-kit "REASON"   continue although the kit signature/core files fail verification
+  --keep-work               keep the working folder after the archive is verified
+  --timeout-factor N        multiply every item time limit by N (1-100; e.g. 3 for very large or slow servers)
+  --no-timeout-prompt       never ask when an item reaches its time limit (stop it, keep partial output)
+  --no-banner               do not print the banner
+  --version, --help
+USAGE
+}
+
+OPT_YES=0; OPT_OUT=""; OPT_WORK=""; OPT_CASE=""; OPT_EXAMINER=""; OPT_SINCE=30; OPT_PW=""; OPT_PWPROMPT=0
+OPT_PCAPSEC=60; OPT_KUBECONFIG=""; OPT_DRY=0; OPT_SELFTEST=0; OPT_FORCE=""; OPT_KEEP=0; OPT_NOBANNER=0; OPT_TFACTOR=1; OPT_TPROMPT=1
+C0F_OPT_RAM=1; C0F_OPT_SWAP=1; C0F_OPT_PCAP=1; C0F_OPT_TIMELINE=1; C0F_OPT_E2IMAGE=1; C0F_OPT_CEXPORT=1
+C0F_OPT_DBBINLOG=1; C0F_OPT_DBWAL=1; C0F_OPT_DBDATA=1; C0F_OPT_PDUMP=1; C0F_OPT_SCREENSHOT=1; C0F_OPT_CLIPBOARD=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --arch) ARCH=$2; shift;;
+    --yes) OPT_YES=1;;
+    --out) OPT_OUT=$2; shift;;
+    --work) OPT_WORK=$2; shift;;
+    --case) OPT_CASE=$2; shift;;
+    --examiner) OPT_EXAMINER=$2; shift;;
+    --since) OPT_SINCE=$2; shift;;
+    --password) OPT_PW=$2; shift;;
+    --password-prompt) OPT_PWPROMPT=1;;
+    --pcap-seconds) OPT_PCAPSEC=$2; shift;;
+    --kubeconfig) OPT_KUBECONFIG=$2; shift;;
+    --no-ram) C0F_OPT_RAM=0;; --no-swap) C0F_OPT_SWAP=0;; --no-pcap) C0F_OPT_PCAP=0;;
+    --no-timeline) C0F_OPT_TIMELINE=0;; --no-e2image) C0F_OPT_E2IMAGE=0;; --no-container-export) C0F_OPT_CEXPORT=0;;
+    --no-db-binlogs) C0F_OPT_DBBINLOG=0;; --no-db-wal) C0F_OPT_DBWAL=0;; --no-db-data) C0F_OPT_DBDATA=0;;
+    --no-process-dumps) C0F_OPT_PDUMP=0;; --no-screenshot) C0F_OPT_SCREENSHOT=0;; --no-clipboard) C0F_OPT_CLIPBOARD=0;;
+    --dry-run) OPT_DRY=1;;
+    --self-test) OPT_SELFTEST=1;;
+    --force-untrusted-kit) OPT_FORCE=$2; shift;;
+    --keep-work) OPT_KEEP=1;;
+    --timeout-factor) OPT_TFACTOR=$2; shift;;
+    --no-timeout-prompt) OPT_TPROMPT=0;;
+    --no-banner) OPT_NOBANNER=1;;
+    --version) echo "C0F $C0F_VERSION"; exit 0;;
+    -h|--help) usage; exit 0;;
+    *) echo "[C0F] unknown option: $1 (see --help)" >&2; exit 2;;
+  esac
+  shift
+done
+case "$OPT_SINCE" in ''|*[!0-9]*) echo "[C0F] --since needs a number of days" >&2; exit 2;; esac
+case "$OPT_PCAPSEC" in ''|*[!0-9]*) echo "[C0F] --pcap-seconds needs a number" >&2; exit 2;; esac
+case "$OPT_TFACTOR" in ''|*[!0-9]*) echo "[C0F] --timeout-factor needs a whole number from 1 to 100" >&2; exit 2;; esac
+{ [ "$OPT_TFACTOR" -ge 1 ] && [ "$OPT_TFACTOR" -le 100 ]; } || { echo "[C0F] --timeout-factor needs a whole number from 1 to 100" >&2; exit 2; }
+
+# Architecture: given by the launcher, otherwise try each kit BusyBox (never trust uname alone).
+if [ -z "$ARCH" ]; then
+  for a in x86_64 aarch64 armv7; do
+    if [ -f "$KIT/bin/$a/busybox" ] && "$KIT/bin/$a/busybox" true >/dev/null 2>&1; then ARCH=$a; break; fi
+  done
+fi
+[ -n "$ARCH" ] || { echo "[C0F] ERROR: no kit BusyBox runs on this machine" >&2; exit 3; }
+BIN="$KIT/bin/$ARCH"; BB="$BIN/busybox"; LIB="$KIT/lib"
+# Until the applet folder exists only kit binaries are on PATH; server programs are never found by name.
+PATH="$BIN:$LIB"; export PATH KIT BIN BB LIB ARCH
+# Programs that exist only as BusyBox applets (awk, sed, grep, rm, mv, sleep, od, ...) are reached through shell
+# functions in this shell; child processes get a real applet folder later (section 6).
+for _a in $("$BB" --list 2>/dev/null); do
+  case "$_a" in *[!A-Za-z0-9_]*|'['|'[['|sh|ash|busybox) continue;; esac
+  [ -f "$BIN/$_a" ] && continue
+  eval "$_a() { \"\$BB\" $_a \"\$@\"; }"
+done
+unset _a
+LC_ALL=C; LANG=C; export LC_ALL LANG
+umask 077
+trap '' HUP          # survive a dropped SSH session; progress continues in collector.log
+
+# small helpers usable before the working folder exists ------------------------------------------
+EARLY=""
+utc() { date -u +%Y-%m-%dT%H:%M:%S.%NZ 2>/dev/null || "$BB" date -u +%Y-%m-%dT%H:%M:%SZ; }
+ns()  { date +%s%N 2>/dev/null || echo "$(( $("$BB" date +%s) * 1000000000 ))"; }
+log() { if [ -n "$C0F_LOG" ]; then printf '%s %s\n' "$(utc)" "$*" >> "$C0F_LOG"; else EARLY="$EARLY$(utc) $*$NL"; fi; }
+say() { printf '[C0F] %s\n' "$*"; log "$*"; }
+warn() { printf '[C0F] WARN %s\n' "$*"; log "WARN $*"; C0F_WARNINGS=$((C0F_WARNINGS+1)); }
+die() { printf '[C0F] ERROR %s\n' "$1" >&2; log "ERROR $1"; exit "${2:-2}"; }
+ask() { # ask "question" default -> REPLY
+  printf '%s' "$1" ; REPLY=""
+  if [ -t 0 ]; then read -r REPLY || REPLY=""; fi
+  [ -z "$REPLY" ] && REPLY=$2; return 0; }
+C0F_WARNINGS=0; C0F_LOG=""
+
+# ------------------------------------------------------------------------------------------------
+# 1. Root
+# ------------------------------------------------------------------------------------------------
+C0F_INVOKER="${SUDO_USER:-$(id -un 2>/dev/null)}"
+if [ "$(id -u 2>/dev/null)" != 0 ] && [ "$OPT_DRY" = 0 ]; then
+  for s in /usr/bin/sudo /bin/sudo /usr/local/bin/sudo /usr/sbin/sudo; do
+    if [ -x "$s" ]; then
+      echo "[C0F] Not running as root: re-starting with sudo ($s)."
+      exec "$s" "$BB" sh "$KIT/c0f.sh" --arch "$ARCH" $ORIG_ARGS
+    fi
+  done
+  die "C0F must run as root (uid 0). No sudo found. Log in as root and run: $KIT/c0f" 2
+fi
+C0F_EUSER=$(id -un 2>/dev/null); C0F_EUID=$(id -u 2>/dev/null)
+
+# ------------------------------------------------------------------------------------------------
+# 2. Banner
+# ------------------------------------------------------------------------------------------------
+banner_wide() {
+cat <<'BANNER'
+@@BANNER_WIDE@@
+BANNER
+}
+closing_banner() {
+cat <<'CLOSER'
+==============================================================================
+[ CORPU5 0MNIA FORENSICS ] // Result : Execution & Acquisition Finished
+------------------------------------------------------------------------------
+* Decoding the shadows, sharing the light.
+* Learn from experience, share the knowledge, help the community.
+  Document and share the tool, just to protect the evidence.
+* Sharing Knowledge, Securing Truth. Contribute & Share Responsibly.
+==============================================================================
+CLOSER
+}
+banner_narrow() {
+cat <<'BANNER'
+@@BANNER_NARROW@@
+BANNER
+}
+COLS=${COLUMNS:-0}
+if [ "$COLS" = 0 ] && [ -t 1 ]; then COLS=$(stty size 2>/dev/null </dev/tty | awk '{print $2}' 2>/dev/null || "$BB" stty size 2>/dev/null </dev/tty | "$BB" awk '{print $2}'); fi
+[ -n "$COLS" ] || COLS=80
+if [ "$OPT_NOBANNER" = 0 ]; then
+  if [ "$COLS" -ge 154 ] 2>/dev/null; then banner_wide; else banner_narrow; fi
+  echo "  C0F $C0F_VERSION  |  kit: $KIT  |  arch: $ARCH  |  user: $C0F_EUSER (invoked by $C0F_INVOKER)"
+  echo
+fi
+
+# ------------------------------------------------------------------------------------------------
+# 3. Kit verification (decision B): signature + per-file hashes, before anything is collected
+# ------------------------------------------------------------------------------------------------
+# Core files: if one of these is modified or missing (or the signature fails) the run stops unless
+# --force-untrusted-kit "reason" is given. Other kit binaries that fail are not used (QUESTIONABLE/DEGRADED).
+CORE_LIST="c0f c0f.sh catalog.tsv os-profile.tsv lib/c0f-lib.sh lib/srv bin/$ARCH/busybox bin/$ARCH/minisign bin/$ARCH/sha256sum bin/$ARCH/timeout bin/$ARCH/c0f-copy bin/$ARCH/date"
+KIT_INTEGRITY=VERIFIED; KIT_SIG=UNKNOWN; KIT_ROWS=""; KIT_BAD_CORE=""; KIT_BLOCKED=""; KIT_SUMS_SHA=""; KIT_PUBKEY=""
+rank() { case "$1" in VERIFIED) echo 0;; DEGRADED) echo 1;; QUESTIONABLE) echo 2;; COMPROMISED) echo 3;; esac; }
+worse() { [ "$(rank "$1")" -gt "$(rank "$KIT_INTEGRITY")" ] && KIT_INTEGRITY=$1; return 0; }
+is_core() { case " $CORE_LIST " in *" $1 "*) return 0;; esac; return 1; }
+kitrow() { KIT_ROWS="$KIT_ROWS$1,$2,$3,$4,$5$NL"; }   # path,status,expected,found,action
+
+verify_kit() {
+  S="$KIT/SHA256SUMS"
+  if [ ! -f "$S" ]; then
+    KIT_SIG=MISSING_SHA256SUMS; worse COMPROMISED; KIT_BAD_CORE="SHA256SUMS"; return
+  fi
+  KIT_SUMS_SHA=$("$BB" sha256sum "$S" | "$BB" cut -c1-64)
+  [ -f "$KIT/minisign.pub" ] && KIT_PUBKEY=$("$BB" tail -n 1 "$KIT/minisign.pub")
+  # minisign itself must match its listed hash before its answer means anything
+  exp=$("$BB" awk -v p="bin/$ARCH/minisign" '$2==p || $2=="*"p {print $1}' "$S")
+  got=""; [ -f "$BIN/minisign" ] && got=$("$BB" sha256sum "$BIN/minisign" | "$BB" cut -c1-64)
+  if [ ! -f "$KIT/SHA256SUMS.minisig" ] || [ ! -f "$KIT/minisign.pub" ]; then KIT_SIG=MISSING_SIGNATURE_OR_KEY
+  elif [ -z "$got" ] || [ "$exp" != "$got" ]; then KIT_SIG=MINISIGN_BINARY_NOT_TRUSTED
+  elif "$BIN/minisign" -Vm "$S" -p "$KIT/minisign.pub" -q >/dev/null 2>&1; then KIT_SIG=OK
+  else KIT_SIG=FAILED; fi
+  [ "$KIT_SIG" = OK ] || { worse COMPROMISED; KIT_BAD_CORE="$KIT_BAD_CORE SHA256SUMS.minisig($KIT_SIG)"; }
+  # hash every listed file of this architecture and the common files; other architectures: presence only
+  while read -r h p; do
+    p=${p#\*}
+    case "$p" in bin/*) case "$p" in "bin/$ARCH/"*) ;; *) [ -f "$KIT/$p" ] || OTHER_MISSING=1; continue;; esac;; esac
+    if [ ! -f "$KIT/$p" ]; then
+      if is_core "$p"; then worse COMPROMISED; KIT_BAD_CORE="$KIT_BAD_CORE $p(MISSING)"; kitrow "$p" MISSING "$h" "" STOP
+      else case "$p" in README.txt|LICENSES/*|BUILDINFO.txt) kitrow "$p" MISSING "$h" "" "IGNORED";;
+             *) worse DEGRADED; kitrow "$p" MISSING "$h" "" "NOT_AVAILABLE"; KIT_BLOCKED="$KIT_BLOCKED ${p##*/}";; esac; fi
+      continue
+    fi
+    f=$("$BB" sha256sum "$KIT/$p" | "$BB" cut -c1-64)
+    if [ "$f" = "$h" ]; then kitrow "$p" OK "$h" "$f" USED
+    elif is_core "$p"; then worse COMPROMISED; KIT_BAD_CORE="$KIT_BAD_CORE $p(MODIFIED)"; kitrow "$p" MODIFIED "$h" "$f" STOP
+    else case "$p" in README.txt|LICENSES/*|BUILDINFO.txt) kitrow "$p" MODIFIED "$h" "$f" IGNORED;;
+           *) worse QUESTIONABLE; kitrow "$p" MODIFIED "$h" "$f" NOT_USED; KIT_BLOCKED="$KIT_BLOCKED ${p##*/}";; esac
+    fi
+  done < "$S"
+  # files in bin/<arch>/ that are not listed = foreign files: never executed, copied as evidence later
+  for f in $("$BB" find "$BIN" -type f 2>/dev/null); do
+    p=${f#"$KIT"/}
+    "$BB" grep -q "  $p\$" "$S" || "$BB" grep -q " \*$p\$" "$S" || { worse QUESTIONABLE; kitrow "$p" EXTRA "" "$("$BB" sha256sum "$f" | "$BB" cut -c1-64)" NOT_USED; KIT_EXTRA="$KIT_EXTRA $f"; KIT_BLOCKED="$KIT_BLOCKED ${p##*/}"; }
+  done
+}
+OTHER_MISSING=0; KIT_EXTRA=""
+say "Verifying kit integrity (signature + SHA-256 of every file for $ARCH) ..."
+verify_kit
+echo "[C0F] KIT INTEGRITY: $KIT_INTEGRITY"
+echo "       signature        : $KIT_SIG"
+echo "       public key       : ${KIT_PUBKEY:-none}   (compare with the key in your SOP)"
+# official C0F release key: a different key means a private build or a replaced kit (not necessarily malicious)
+C0F_OFFICIAL_PUBKEY=RWTFlf0U9/S2PXk4OI50uQVSJDMd8eMj4fzXLKRv9IpU8ux5DvRQpr5p
+if [ "$KIT_PUBKEY" = "$C0F_OFFICIAL_PUBKEY" ]; then echo "       release key      : official C0F release key"
+else echo "       release key      : NOT the official C0F release key - this is not an official C0F release (private build or replaced kit)"; fi
+echo "       SHA256SUMS sha256: ${KIT_SUMS_SHA:-none}"
+printf '%s' "$KIT_ROWS" | "$BB" awk -F, '$2!="OK"{printf "       %-40s %-9s %s\n",$1,$2,$5}'
+if [ -n "$KIT_BAD_CORE" ]; then
+  if [ -z "$OPT_FORCE" ] || [ ${#OPT_FORCE} -lt 10 ]; then
+    echo
+    [ -n "$OPT_FORCE" ] && echo "[C0F] --force-untrusted-kit ignored: the reason '$OPT_FORCE' is too short (${#OPT_FORCE} characters, at least 10 needed)"
+    echo "[C0F] KIT VERIFICATION FAILED - collection NOT started"
+    echo "       core problem: ${KIT_BAD_CORE# }"
+    echo "       Use a clean copy of the kit. To continue anyway (status COMPROMISED) run with"
+    echo "       --force-untrusted-kit \"<reason, at least 10 characters>\""
+    KIT_STOPPED=1
+  else
+    warn "kit core verification failed (${KIT_BAD_CORE# }) - continuing because of --force-untrusted-kit: $OPT_FORCE"
+  fi
+fi
+[ "$OTHER_MISSING" = 1 ] && say "Note: files for other architectures are missing (not used on this host)."
+
+# ------------------------------------------------------------------------------------------------
+# 4. Host identity and OS profile
+# ------------------------------------------------------------------------------------------------
+HOST_RAW=$(cat /proc/sys/kernel/hostname 2>/dev/null); HOST_RAW=${HOST_RAW%%.*}
+HOST=$(printf '%s' "$HOST_RAW" | "$BB" tr -c 'A-Za-z0-9.+_-' '-' | "$BB" cut -c1-40)
+if [ -z "$HOST" ] || [ "$HOST" = localhost ]; then
+  mid=$("$BB" cut -c1-8 /etc/machine-id 2>/dev/null); HOST="host-${mid:-unknown}"; HOST_NOTE="hostname empty/localhost: machine-id used"
+fi
+HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | "$BB" awk '{for(i=1;i<NF;i++) if($i=="src"){print $(i+1); exit}}')
+[ -n "$HOST_IP" ] || HOST_IP=$(ip -o addr show scope global 2>/dev/null | "$BB" awk '{split($4,a,"/"); print a[1]; exit}')
+[ -n "$HOST_IP" ] || HOST_IP=noip
+HOST_IP_FILE=$(printf '%s' "$HOST_IP" | "$BB" tr ':' '-')
+
+. "$LIB/c0f-lib.sh" || die "cannot load lib/c0f-lib.sh" 3
+os_detect          # sets OS_ID OS_NAME OS_VERSION_ID OS_FAMILY OS_PROFILE OS_PKG OS_INIT OS_EXPECT_MUST OS_EXPECT_DEFAULT
+export OS_ID OS_NAME OS_VERSION_ID OS_FAMILY OS_PROFILE OS_PKG OS_INIT OS_EXPECT_MUST OS_EXPECT_DEFAULT OS_LIKE
+say "Host $HOST ($HOST_IP), $OS_NAME, kernel $(uname -r 2>/dev/null), profile $OS_PROFILE"
+
+if [ "${KIT_STOPPED:-0}" = 1 ]; then
+  vf_report() { echo "C0F $C0F_VERSION kit verification failed - collection NOT started"
+    echo "host: $HOST ($HOST_IP)  time_utc: $(utc)  user: $C0F_EUSER (invoked by $C0F_INVOKER)"
+    echo "signature: $KIT_SIG   SHA256SUMS sha256: $KIT_SUMS_SHA"; echo "core:$KIT_BAD_CORE"
+    echo "path,status,expected_sha256,found_sha256,action"; printf '%s' "$KIT_ROWS"; }
+  # the kit may be on read-only media: try the --out folder, the kit folder, then /tmp; else print the details
+  vf_name="C0F-KIT-VERIFY-FAILED_$(date -u +%Y%m%dT%H%M%SZ).txt"; vf_done=""
+  for d in ${OPT_OUT:+"$OPT_OUT"} "$KIT/$HOST" /tmp; do
+    mkdir -p "$d" 2>/dev/null && vf_report > "$d/$vf_name" 2>/dev/null && { vf_done="$d/$vf_name"; break; }
+  done
+  if [ -n "$vf_done" ]; then echo "[C0F] Details written to $vf_done"
+  else echo "[C0F] Details (could not write a file):"; vf_report | "$BB" sed 's/^/       /'; fi
+  exit 3
+fi
+
+# ------------------------------------------------------------------------------------------------
+# 5. Self-test of kit tools (finds noexec, fapolicyd/SELinux blocks, too-old kernels in the first minute)
+# ------------------------------------------------------------------------------------------------
+selftest_tools() {  # writes $1 (csv) and extends KIT_BLOCKED
+  out=$1; echo "tool,path,sha256,result,detail" > "$out"
+  for f in "$BIN"/* "$BIN"/chkrootkit/*; do
+    [ -f "$f" ] || continue; n=${f##*/}
+    case " $KIT_BLOCKED " in *" $n "*) echo "$n,$f,,NOT_USED,failed kit verification" >> "$out"; continue;; esac
+    case $n in
+      busybox) a="true";; c0f-*) a="-V";; kubectl) a="version --client";; 7zzs) a="i";; jq|avml|docker|ctr|runc|crictl|minisign) a="--version";;
+      xtables-legacy-multi) a="iptables-save -V";; xtables-nft-multi) a="iptables-nft-save -V";; ipset) a="version";; lsattr) a="-V";;
+      getcap) a="$f";; lsof) a="-v";; file) a="-m $KIT/share/magic.mgc $f";; ip|ss|bridge) a="-V";; sqlite3) a="-version";;
+      chkrootkit|chkproc|chkdirs|chkutmp|chklastlog|chkwtmp|ifpromisc|strings-static) echo "$n,$f,,PRESENT,not executed in self-test" >> "$out"; continue;;
+      *) a="--version";;
+    esac
+    r=$(timeout 20 "$f" $a 2>&1 </dev/null); rc=$?
+    first=$(printf '%s' "$r" | "$BB" head -n 1 | "$BB" tr ',"' ';'"'" | "$BB" cut -c1-80)
+    case "$r" in *"kernel too old"*|*"FATAL: kernel"*) res=KERNEL_TOO_OLD;;
+      *) if [ $rc = 126 ] || { [ $rc = 127 ] && [ -z "$r" ]; } || [ $rc = 132 ] || [ $rc = 139 ]; then res=BLOCKED_BY_POLICY
+         elif printf '%s' "$r" | "$BB" grep -qiE 'exec format error|illegal instruction|segmentation fault|cannot execute binary'; then res=BLOCKED_BY_POLICY
+         else res=OK; fi;;
+    esac
+    [ $rc = 124 ] && res=TIMEOUT
+    echo "$n,$f,$("$BB" sha256sum "$f" | "$BB" cut -c1-64),$res,\"$first\"" >> "$out"
+    if [ "$res" != OK ]; then KIT_BLOCKED="$KIT_BLOCKED $n"; fi
+  done
+}
+
+# ------------------------------------------------------------------------------------------------
+# 6. Output and working location
+# ------------------------------------------------------------------------------------------------
+LOCAL_TS=$(date +%d-%b-%Y_%H-%M-%S); FRAC=$(date +%N 2>/dev/null | "$BB" cut -c1-5); [ -n "$FRAC" ] || FRAC=00000
+TZOFF=$(date +%z 2>/dev/null); TZOFF=${TZOFF:-+0000}
+NAME="${HOST}_${HOST_IP_FILE}_${LOCAL_TS}-${FRAC}_UTC${TZOFF}"
+DISPLAY_NAME="$HOST - $HOST_IP - $(date '+%d %b %Y - %H:%M:%S'):$FRAC"
+OUTDIR=${OPT_OUT:-$KIT/$HOST}
+
+if [ "$OPT_SELFTEST" = 1 ]; then
+  st="${TMPDIR:-/tmp}/c0f-selftest-$$.csv"; selftest_tools "$st"
+  "$BB" awk -F, 'NR>1{printf "  %-22s %-18s %s\n",$1,$4,$5}' "$st"
+  echo "[C0F] self-test written to $st (kit integrity: $KIT_INTEGRITY)"; exit 0
+fi
+
+if [ "$OPT_YES" = 0 ] && [ "$OPT_DRY" = 0 ]; then
+  ask "Save output to [$OUTDIR]: " "$OUTDIR"; OUTDIR=$REPLY
+fi
+mkdir -p "$OUTDIR" 2>/dev/null || die "cannot create output folder $OUTDIR (read-only media?). Use --out DIR" 2
+OUTDIR=$(cd "$OUTDIR" && pwd -P)
+probe="$OUTDIR/.c0f-write-test-$$"
+( : > "$probe" ) 2>/dev/null || die "output folder $OUTDIR is not writable. Use --out DIR" 2
+rm -f "${probe:?}"
+OUT_FSTYPE=$(stat -f -c %T "$OUTDIR" 2>/dev/null)
+case "$OUT_FSTYPE" in tmpfs|ramfs) die "output folder $OUTDIR is in RAM ($OUT_FSTYPE): it would consume the server's memory. Use --out DIR on a disk or USB" 2;; esac
+out_is_external   # sets OUT_EXTERNAL=YES|NO and OUT_DEVICE
+WORKBASE=${OPT_WORK:-$OUTDIR/.work-$NAME}
+mkdir -p "$WORKBASE" || die "cannot create working folder $WORKBASE" 2
+WORKBASE=$(cd "$WORKBASE" && pwd -P)
+OUTROOT="$WORKBASE/$NAME"; T="$WORKBASE/tmp"
+LOCKF="$OUTDIR/.c0f.lock"
+if [ -f "$LOCKF" ] && kill -0 "$("$BB" cat "$LOCKF" 2>/dev/null)" 2>/dev/null; then die "another C0F run (pid $(cat "$LOCKF")) is using $OUTDIR" 2; fi
+echo $$ > "$LOCKF"
+mkdir -p "$T"/meta "$T"/sub "$T"/srv "$T"/err "$T"/out "$T"/home "$T"/run || die "cannot create $T" 2
+C0F_LOG="$T/collector.log"; printf '%s' "$EARLY" > "$C0F_LOG"; EARLY=""
+log "C0F $C0F_VERSION start; args: $ORIG_ARGS"
+log "kit=$KIT arch=$ARCH integrity=$KIT_INTEGRITY signature=$KIT_SIG outdir=$OUTDIR work=$WORKBASE fstype=$OUT_FSTYPE external=$OUT_EXTERNAL"
+
+# applet folder: BusyBox applets (awk, sed, grep, netstat, ...) must exist as files for programs that exec them
+APPLETS="$T/applets"; mkdir -p "$APPLETS"
+if ln -s "$BB" "$APPLETS/.t" 2>/dev/null; then rm -f "${APPLETS:?}/.t"; "$BB" --install -s "$APPLETS" 2>/dev/null; APPLET_MODE=symlink
+else
+  for a in $("$BB" --list); do printf '#!%s\nexec "%s" %s "$@"\n' "$BB" "$BB" "$a" > "$APPLETS/$a"; chmod 700 "$APPLETS/$a"; done; APPLET_MODE=wrapper
+fi
+PATH="$BIN:$APPLETS:$LIB"; export PATH
+# keep tools from writing into the examined system's home folders
+export HOME="$T/home" XDG_CACHE_HOME="$T/home/.cache" XDG_CONFIG_HOME="$T/home/.config" KUBECACHEDIR="$T/home/.kube/cache" DOCKER_CONFIG="$T/home/.docker"
+export PAGER=cat SYSTEMD_PAGER=cat SYSTEMD_COLORS=0 SYSTEMD_LESS="" TERM=dumb
+export OUT_EXTERNAL C0F_OUT="$OUTROOT" C0F_TMP="$T" C0F_EXCL="$WORKBASE" C0F_OUTDIR="$OUTDIR" C0F_SINCE="$OPT_SINCE" C0F_PCAPSEC="$OPT_PCAPSEC" C0F_KUBECONFIG="$OPT_KUBECONFIG" C0F_KITDIR="$KIT"
+export C0F_OPT_RAM C0F_OPT_SWAP C0F_OPT_PCAP C0F_OPT_TIMELINE C0F_OPT_E2IMAGE C0F_OPT_CEXPORT C0F_OPT_DBBINLOG C0F_OPT_DBWAL C0F_OPT_DBDATA C0F_OPT_PDUMP C0F_OPT_SCREENSHOT C0F_OPT_CLIPBOARD
+export C0F_MAGIC="$KIT/share/magic.mgc" C0F_VERSION
+
+say "Self-test of kit tools on this host ..."
+selftest_tools "$T/kit-selftest.csv"
+# tools that must not / cannot run: shell functions in blocked.sh route them to the server program instead
+: > "$T/blocked.sh"
+for n in $KIT_BLOCKED; do
+  case "$n" in *[!A-Za-z0-9._-]*|'') continue;; esac
+  printf '%s() { echo "C0F: kit tool %s not usable (verification/self-test) - using server program" >&2; srv %s "$@"; }\n' "$(printf %s "$n" | "$BB" tr '.-' '__')" "$n" "$n" >> "$T/blocked.sh"
+done
+export C0F_BLOCKED_SH="$T/blocked.sh" C0F_BLOCKED_LIST="$KIT_BLOCKED"
+nblk=$(echo $KIT_BLOCKED | "$BB" wc -w); [ "$nblk" -gt 0 ] && warn "$nblk kit tool(s) not usable on this host: ${KIT_BLOCKED# } (server programs will be used where they exist)"
+
+# ------------------------------------------------------------------------------------------------
+# 7. Case details, estimate, start warning
+# ------------------------------------------------------------------------------------------------
+CASE=$OPT_CASE; EXAMINER=$OPT_EXAMINER; TRUSTED_START=""; NOTE_START=""
+if [ "$OPT_YES" = 0 ] && [ "$OPT_DRY" = 0 ]; then
+  [ -n "$CASE" ] || { ask "Case / ticket number: " ""; CASE=$REPLY; }
+  [ -n "$EXAMINER" ] || { ask "Examiner name: " ""; EXAMINER=$REPLY; }
+  ask "Current time from a TRUSTED clock (phone/GPS), UTC 'YYYY-MM-DD HH:MM:SS', Enter to skip: " ""; TRUSTED_START=$REPLY
+  [ -n "$TRUSTED_START" ] && TRUSTED_START_SERVER=$(utc)
+  ask "Examiner note (free text, Enter to skip): " ""; NOTE_START=$REPLY
+elif [ "$OPT_YES" = 1 ] && [ "$OPT_DRY" = 0 ]; then
+  { [ -n "$CASE" ] && [ -n "$EXAMINER" ]; } || die "--yes needs --case and --examiner" 2
+fi
+log "case=$CASE examiner=$EXAMINER trusted_start=$TRUSTED_START note=$NOTE_START"
+
+say "Estimating size (rough) ..."
+EST_KB=$(estimate_kb 2>/dev/null); EST_KB=${EST_KB:-0}
+FREE_KB=$(df -Pk "$WORKBASE" 2>/dev/null | "$BB" awk 'NR==2{print $4}'); FREE_KB=${FREE_KB:-0}
+NEED_KB=$(( EST_KB * 2 ))
+gb() { "$BB" awk -v k="$1" 'BEGIN{printf "%.1f", k/1048576}'; }
+NITEMS=$("$BB" awk -F'\t' 'NR>1 && $1!~/^#/' "$KIT/catalog.tsv" | "$BB" wc -l)
+
+if [ "$OPT_DRY" = 1 ]; then
+  echo "[C0F] DRY RUN - nothing is collected. Items and whether they apply on this host:"
+  "$BB" awk -F'\t' 'NR>1' "$KIT/catalog.tsv" | while IFS="$TAB" read -r id dom ord typ opt req tool cmd out to rest; do
+    a=YES; if [ "$req" != - ]; then ( eval "$req" ) </dev/null >/dev/null 2>&1 || a=no; fi
+    printf '  %-8s %-4s %-6s %-3s %s\n' "$id" "$typ" "$tool" "$a" "$(printf '%s' "$cmd" | "$BB" cut -c1-90)"
+  done
+  echo "[C0F] estimated data ~$(gb "$EST_KB") GB, free at $WORKBASE: $(gb "$FREE_KB") GB"
+  rm -rf "${WORKBASE:?}"; rm -f "${LOCKF:?}"; exit 0
+fi
+
+echo
+echo "[C0F] WARNING - READ BEFORE CONTINUING"
+echo " 1. Authorized use only. Run this tool only with approval from the system owner / incident lead."
+echo " 2. Live-response evidence collection on host $HOST ($HOST_IP), $OS_NAME,"
+echo "    as user $C0F_EUSER (invoked by $C0F_INVOKER). Kit integrity: $KIT_INTEGRITY."
+echo " 3. It reads system files, logs, memory, processes, network state, containers and credential files"
+echo "    (/etc/shadow, keys, tokens, process environments). The result is HIGHLY SENSITIVE."
+echo " 4. It does not change configuration or restart services, but it WILL: create files in the output folder,"
+echo "    add entries to system logs (sudo/audit/journal), use CPU, disk I/O and disk space, and may trigger"
+echo "    EDR alerts (memory dump, packet capture). Inform the SOC/EDR team first."
+echo " 5. Output folder : $OUTDIR   (on the examined system's disk: $( [ "$OUT_EXTERNAL" = YES ] && echo NO || echo YES))"
+echo "    Estimated size: ~$(gb "$EST_KB") GB (rough; ~2x needed while archiving)   Free space: $(gb "$FREE_KB") GB   Items: $NITEMS"
+echo " 6. Do not power off, reboot or clean up this host before the collection has finished."
+[ "$OUT_EXTERNAL" = NO ] && echo " !  Writing to the examined system overwrites free space (less chance to recover deleted files)."
+[ "$FREE_KB" -lt "$NEED_KB" ] 2>/dev/null && { echo " !  Free space looks too small for the estimate (incl. RAM and archive). Large items (RAM, swap, process dumps, pcap,"
+  echo "    timeline, e2image, DB files) are skipped once free space falls below the reserve; the rest is still collected."
+  echo "    The archive may not fit: prefer --out on external media or a network share."; }
+[ "$KIT_INTEGRITY" != VERIFIED ] && echo " !  Kit integrity is $KIT_INTEGRITY: results that depend on affected tools are flagged in the report."
+[ -r /sys/kernel/security/lockdown ] && "$BB" grep -q '\[integrity\]\|\[confidentiality\]' /sys/kernel/security/lockdown && echo " !  Kernel lockdown is active: the RAM dump may be refused."
+[ "$ARCH" = armv7 ] && echo " !  armv7: no RAM dump tool for 32-bit ARM (AVML is not released for it); per-process dumps are still taken."
+if [ "$OPT_YES" = 1 ]; then echo "[C0F] --yes given: continuing."; log "start warning acknowledged by --yes"
+else
+  printf 'Type YES to continue, anything else to abort: '; ans=""
+  if [ -t 0 ]; then read -r ans || ans=""; else { read -r ans </dev/tty; } 2>/dev/null || ans=""; fi
+  if [ "$ans" != YES ]; then
+    [ -t 0 ] || [ -n "$ans" ] || { echo; say "No terminal to answer the question. For an unattended run use: --yes --case ID --examiner NAME"; }
+    say "Aborted by operator before collection."; rm -rf "${WORKBASE:?}"; rm -f "${LOCKF:?}"; exit 2
+  fi
+  log "start warning acknowledged by operator (typed YES)"
+fi
+RUN_START_UTC=$(utc); RUN_START_NS=$(ns); RUN_START_LOCAL=$(date '+%Y-%m-%d %H:%M:%S %z')
+
+# archive password
+if [ "$OPT_PWPROMPT" = 1 ]; then printf 'Archive password: '; "$BB" stty -echo 2>/dev/null; read -r PW; "$BB" stty echo 2>/dev/null; echo; PW_SRC=prompt
+elif [ -n "$OPT_PW" ]; then PW=$OPT_PW; PW_SRC=option
+else PW=$HOST; PW_SRC="short hostname"; fi
+
+# ------------------------------------------------------------------------------------------------
+# 8. Output tree (always complete, folders stay empty when nothing is found)
+# ------------------------------------------------------------------------------------------------
+DOMAINS="D01:01_system D02:02_time D03:03_memory D04:04_processes D05:05_network D06:06_firewall_hardening D07:07_accounts_auth D08:08_persistence D09:09_services D10:10_software D11:11_filesystem_storage D12:12_logs D13:13_web_servers D14:14_databases D15:15_mail D16:16_applications D17:17_desktop_gui D18:18_containers D19:19_kubernetes D20:20_virtualization D21:21_cloud_agents D22:22_security_tools D23:23_kernel_rootkit D99:99_custody"
+domdir() { for d in $DOMAINS; do [ "${d%%:*}" = "$1" ] && { echo "${d#*:}"; return; }; done; echo "00_other"; }
+for d in $DOMAINS; do mkdir -p "$OUTROOT/${d#*:}"; done
+"$BB" awk -F'\t' 'NR>1 && $9!="-" && $4!="COPY" {print $2"\t"$9}' "$KIT/catalog.tsv" | while IFS="$TAB" read -r dom out; do
+  case "$out" in */*) mkdir -p "$OUTROOT/$(domdir "$dom")/${out%/*}";; esac; done
+"$BB" awk -F'\t' 'NR>1 && $4=="COPY" {print $2}' "$KIT/catalog.tsv" | "$BB" sort -u | while read -r dom; do mkdir -p "$OUTROOT/$(domdir "$dom")/files"; done
+# FUNC/DERIVED items that write a folder: create it now so it exists (empty) even when nothing is found
+"$BB" awk -F'\t' 'NR>1 && ($4=="FUNC"||$4=="DERIVED") && $9!="-" && $9 !~ /\.(txt|tsv|csv|json|log|yaml|png)$/ {print $2"\t"$9}' "$KIT/catalog.tsv" | while IFS="$TAB" read -r dom out; do mkdir -p "$OUTROOT/$(domdir "$dom")/$out"; done
+CUST="$OUTROOT/99_custody"
+
+# ------------------------------------------------------------------------------------------------
+# 9. Item runner
+# ------------------------------------------------------------------------------------------------
+ITEMS="$T/items.tsv"
+printf 'seq\tid\tdomain\ttype\ttool\tcommand_or_path\toutput\tstatus\treason\trc\tstart_utc\tend_utc\tduration_ms\tbytes\ttool_integrity\tnote\n' > "$ITEMS"
+# item process groups need the kit setsid; the time-limit question needs an operator at a terminal
+ITEM_PG=1; case " $KIT_BLOCKED " in *" setsid "*) ITEM_PG=0;; esac; [ -x "$BIN/setsid" ] || ITEM_PG=0
+TIMEOUT_ASK=0; [ "$OPT_YES" = 0 ] && [ "$OPT_TPROMPT" = 1 ] && [ -t 0 ] && TIMEOUT_ASK=1
+log "time limits: factor $OPT_TFACTOR, ask operator at limit: $( [ "$TIMEOUT_ASK" = 1 ] && echo yes || echo no ), process groups: $( [ "$ITEM_PG" = 1 ] && echo yes || echo no )"
+SEQ=0; C0F_INT=0; C0F_STOP=""; N_OK=0; N_EMPTY=0; N_NF=0; N_FAIL=0; N_TO=0; N_DEN=0; N_SKIP=0
+trap 'C0F_INT=1' INT TERM
+
+alive() { { read -r _l < "/proc/$1/stat"; } 2>/dev/null || return 1; _s=${_l##*) }; _s=${_s%% *}; [ "$_s" != Z ]; }
+# Each item runs in its own process group (setsid). At its time limit the operator is asked (interactive runs only)
+# whether to wait longer; otherwise the whole group is stopped (TERM, then KILL) and the partial output is kept.
+kill_item() { # pid
+  if [ "$ITEM_PG" = 1 ]; then kill -TERM -"$1" 2>/dev/null; else kill -TERM "$1" 2>/dev/null; fi
+  _k=0; while alive "$1" && [ $_k -lt 10 ]; do "$BB" usleep 500000; _k=$((_k+1)); done
+  if alive "$1"; then if [ "$ITEM_PG" = 1 ]; then kill -KILL -"$1" 2>/dev/null; else kill -KILL "$1" 2>/dev/null; fi; "$BB" sleep 2; fi
+}
+hms() { printf '%dm%02ds' $(($1/60)) $(($1%60)); }
+timeout_prompt() { # elapsed_seconds -> prints minutes to add (0 = stop)
+  _sz=$( { [ -f "$o" ] && "$BB" stat -c %s "$o"; [ -d "$ITEM_OUT" ] && du -sk "$ITEM_OUT" 2>/dev/null | "$BB" awk '{print $1*1024}'; } 2>/dev/null | "$BB" awk '{s+=$1} END{printf "%.1f MB", s/1048576}')
+  {
+  echo
+  echo "[C0F] $id is still running after $(hms "$1") (its time limit). Output so far: $_sz."
+  echo "      Press Enter to stop it now (partial output is kept), or type minutes to wait longer (1-1440)."
+  echo "      No answer within 2 minutes = stop."
+  } >&2
+  while :; do
+    printf '      Wait how many more minutes? ' >&2; _a=""
+    read -t 120 -r _a; _r=$?
+    if [ $_r -gt 128 ] || [ "$C0F_INT" = 1 ]; then echo >&2; echo "[C0F] no answer: stopping $id" >&2; echo 0; return; fi
+    case "$_a" in
+      '') echo "[C0F] stopping $id (partial output kept)" >&2; echo 0; return;;
+      *[!0-9]*) echo "[C0F] '$_a' is not a number of minutes (1-1440). Press Enter to stop, or type e.g. 15" >&2;;
+      *) if [ "$_a" -ge 1 ] && [ "$_a" -le 1440 ]; then echo "$_a"; return; fi
+         echo "[C0F] $_a is outside 1-1440 minutes. Press Enter to stop, or type e.g. 15" >&2;;
+    esac
+  done
+}
+watch_pid() { # pid limit_seconds -> rc of process; 255 = abandoned (stuck), 254 = interrupted; sets TIMED_OUT EXTENDED_S STUCK
+  _p=$1; _lim=$2; _i=0; _st=$(date +%s); STUCK=0; TIMED_OUT=0; EXTENDED_S=0
+  while alive "$_p"; do
+    _i=$((_i+1))
+    case $_i in 1|2|3|4|5|6|7|8) "$BB" usleep 20000;; 9|10|11|12|13|14|15|16|17|18) "$BB" usleep 100000;; *) "$BB" usleep 500000;; esac
+    if [ "$C0F_INT" = 1 ]; then kill_item "$_p"; wait "$_p" 2>/dev/null; return 254; fi
+    if [ $((_i % 10)) = 0 ] && [ $(( $(date +%s) - _st )) -ge "$_lim" ]; then
+      if [ "$TIMEOUT_ASK" = 1 ] && [ "$ITEM_PG" = 1 ] && alive "$_p"; then
+        _m=$(timeout_prompt "$(( $(date +%s) - _st ))")
+        if [ "${_m:-0}" -gt 0 ] 2>/dev/null; then
+          _lim=$((_lim + _m*60)); EXTENDED_S=$((EXTENDED_S + _m*60))
+          say "$id: waiting $_m more minutes (limit now $(hms "$_lim"))"; log "$id time limit extended by operator: +${_m} min"; continue
+        fi
+        alive "$_p" || break
+      fi
+      TIMED_OUT=1; kill_item "$_p"
+      if alive "$_p"; then STUCK=1; return 255; fi
+      wait "$_p" 2>/dev/null; return 124
+    fi
+  done
+  wait "$_p" 2>/dev/null; return $?
+}
+space_ok() {
+  fk=$(df -Pk "$WORKBASE" 2>/dev/null | "$BB" awk 'NR==2{print $4" "$2}')
+  free=${fk% *}; tot=${fk#* }; [ -n "$free" ] || return 0
+  if [ "$OUT_EXTERNAL" = NO ]; then min=$(( tot / 10 )); [ "$min" -lt 2097152 ] && min=2097152; else min=524288; fi
+  [ "$free" -ge "$min" ]
+}
+# hard floor: below it nothing more is written (collection stops, 7-Zip is stopped). Between the floor and the
+# reserve (space_ok) only the large optional items are skipped; everything else is still collected.
+hard_ok() {
+  fk=$(df -Pk "$WORKBASE" 2>/dev/null | "$BB" awk 'NR==2{print $4" "$2}')
+  free=${fk% *}; tot=${fk#* }; [ -n "$free" ] || return 0
+  if [ "$OUT_EXTERNAL" = NO ]; then min=$(( tot / 20 )); [ "$min" -lt 1048576 ] && min=1048576; else min=262144; fi
+  [ "$free" -ge "$min" ]
+}
+LARGE_OPTS=" RAM SWAP PDUMP PCAP TIMELINE E2IMAGE CEXPORT DBBINLOG DBWAL DBDATA "; LOWSPACE=0; N_NOTRUN=0
+rec() { # status reason rc start end dur bytes integrity note
+  SEQ=$((SEQ+1))
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$SEQ" "$id" "$dom" "$typ" "$tool" \
+    "$(printf '%s' "$cmd" | "$BB" tr '\t\n' '  ')" "${orel:--}" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$(printf '%s' "$9" | "$BB" tr '\t\n' '  ')" >> "$ITEMS"
+  case "$1" in OK) N_OK=$((N_OK+1));; EMPTY) N_EMPTY=$((N_EMPTY+1));; "NOT FOUND") N_NF=$((N_NF+1));; FAILED) N_FAIL=$((N_FAIL+1));; TIMEOUT) N_TO=$((N_TO+1));; DENIED) N_DEN=$((N_DEN+1));; SKIPPED) N_SKIP=$((N_SKIP+1));; esac
+  case "$1:$2" in SKIPPED:NO_SPACE|SKIPPED:INTERRUPTED) N_NOTRUN=$((N_NOTRUN+1));; esac
+}
+opt_on() { eval "[ \"\${C0F_OPT_$1:-1}\" = 1 ]"; }
+is_file_out() { case "$1" in *.txt|*.tsv|*.csv|*.json|*.log|*.yaml|*.png) return 0;; esac; return 1; }
+
+run_item() {
+  dd="$OUTROOT/$(domdir "$dom")"; orel="-"; o=""
+  if [ -n "$C0F_STOP" ]; then rec SKIPPED "$C0F_STOP" - - - 0 0 - "not run: collection stopped"; return; fi
+  if [ "$opt" != - ] && ! opt_on "$opt"; then rec SKIPPED DISABLED_BY_OPTION - - - 0 0 - "--no option given"; return; fi
+  if [ "$LOWSPACE" = 1 ] && [ "$opt" != - ]; then case "$LARGE_OPTS:$cmd" in *:pcap_stop|*:shell_memory_history) ;;
+    *" $opt "*) rec SKIPPED NO_SPACE - - - 0 0 - "large item not run: free space below the reserve"; return;; esac; fi
+  if [ "$req" != - ]; then
+    if ! ( eval "$req" ) </dev/null >/dev/null 2>&1; then rec SKIPPED NOT_APPLICABLE - - - 0 0 - "condition false: $req"; return; fi
+  fi
+  ITEM_ID=$id; ITEM_DIR=$dd; ITEM_FILES="$dd/files"; ITEM_META="$T/meta/$id.tsv"; C0F_SUB="$T/sub/$id.tsv"; ITEM_SRVLOG="$T/srv/$id.log"
+  export ITEM_ID ITEM_DIR ITEM_FILES ITEM_META C0F_SUB ITEM_SRVLOG
+  ITEM_OUT="$T/out/$id.dir"
+  case "$typ" in
+    COPY) C0F_CMD="c0f_copy $cmd"; o="$T/out/$id.out";;
+    *) C0F_CMD=$cmd
+       if [ "$out" = - ]; then o="$T/out/$id.out"
+       elif [ "$typ" = CMD ] || is_file_out "$out"; then o="$dd/$out"; ITEM_OUT=$o; orel="$(domdir "$dom")/$out"; mkdir -p "${o%/*}"
+       else ITEM_OUT="$dd/$out"; mkdir -p "$ITEM_OUT"; o="$T/out/$id.out"; orel="$(domdir "$dom")/$out"; fi;;
+  esac
+  export ITEM_OUT
+  [ "$typ" = COPY ] && orel="$(domdir "$dom")/files"
+  export C0F_CMD
+  e="$T/err/$id.err"; s0=$(utc); n0=$(ns)
+  lim=$((to * OPT_TFACTOR))
+  if [ "$ITEM_PG" = 1 ]; then
+    "$BIN/setsid" "$BB" sh -c '. "$LIB/c0f-lib.sh"; eval "$C0F_CMD"' </dev/null >"$o" 2>"$e" &
+    watch_pid $! "$lim"; rc=$?
+  else   # kit setsid not usable: fixed limit enforced by timeout (no prompt)
+    timeout -k 5 "$lim" "$BB" sh -c '. "$LIB/c0f-lib.sh"; eval "$C0F_CMD"' </dev/null >"$o" 2>"$e" &
+    watch_pid $! $((lim + 20)); rc=$?; [ "$rc" = 124 ] && TIMED_OUT=1
+  fi
+  s1=$(utc); dur=$(( ($(ns) - n0) / 1000000 ))
+  bytes=0; [ -f "$o" ] && bytes=$(stat -c %s "$o" 2>/dev/null || echo 0)
+  integ=$KIT_INTEGRITY; [ -s "$ITEM_SRVLOG" ] && integ=UNTRUSTED_TOOL
+  note=""; reason=""; st=""
+  if [ "$rc" = 254 ]; then st=SKIPPED; reason=INTERRUPTED; note="interrupted by operator"
+  elif [ "$STUCK" = 1 ]; then st=TIMEOUT; reason=TIMEOUT; note="process stuck in uninterruptible state after $(hms $((lim + EXTENDED_S))): abandoned"
+  elif [ "$TIMED_OUT" = 1 ]; then st=TIMEOUT; reason=TIMEOUT; note="limit $(hms $((lim + EXTENDED_S)))"
+  elif [ "$typ" = COPY ]; then
+    if [ -f "$ITEM_META" ]; then
+      set -- $("$BB" awk -F'\t' 'NR>1{ if($1=="OK"||$1=="EMPTY"||$1=="CHANGED_DURING_COPY") ok++; else if($1=="NOT_FOUND") nf++; else if($1 ~ /^SKIPPED/) sk++; else if($1=="PERMISSION_DENIED") den++; else bad++; if($1=="CHANGED_DURING_COPY") ch++ } END{print ok+0, nf+0, bad+0, den+0, ch+0, sk+0}' "$ITEM_META")
+      if [ "$1" -gt 0 ]; then st=OK; [ $(( $3 + $4 )) -gt 0 ] && note="$3 failed, $4 denied, $1 copied"; [ "$5" -gt 0 ] && note="$note; $5 changed during copy"
+      elif [ "$4" -gt 0 ]; then st=DENIED; reason=PERMISSION_DENIED
+      elif [ "$3" -gt 0 ]; then st=FAILED; reason=EXIT_NONZERO
+      elif [ "$2" -gt 0 ]; then st="NOT FOUND"; reason=NOT_FOUND
+      else st=EMPTY; reason=EMPTY; fi
+      bytes=$("$BB" awk -F'\t' 'NR>1 && $18~/^[0-9]+$/{s+=$18} END{print s+0}' "$ITEM_META")
+    else st="NOT FOUND"; reason=NOT_FOUND; fi
+  elif [ "$rc" = 127 ] && "$BB" grep -q 'C0F: server command not found' "$e" 2>/dev/null; then
+    st="NOT FOUND"; reason=CMD_MISSING; miss=$("$BB" sed -n 's/.*C0F: server command not found: //p' "$e" | "$BB" head -n 1)
+    case " $OS_EXPECT_MUST " in *" $miss "*) reason=EXPECTED_BUT_MISSING; note="profile $OS_PROFILE expects '$miss' on this OS";; esac
+  elif [ "$typ" = FUNC ] || [ "$typ" = DERIVED ]; then
+    case "$rc" in 0) st=OK;; 10) st=EMPTY; reason=EMPTY;; 11) st="NOT FOUND"; reason=NOT_FOUND;; 12) st=SKIPPED; reason=NOT_APPLICABLE;;
+      13) st=OK; note="partial: see sub-results";; 14) st=DENIED; reason=PERMISSION_DENIED;; 15) st=SKIPPED; reason=UNSUPPORTED_ARCH;;
+      16) st=SKIPPED; reason=NO_SPACE; note="not enough free space for this item";;
+      *) st=FAILED; reason=EXIT_NONZERO; note="exit $rc";; esac
+  elif [ "$rc" = 0 ]; then if [ "$bytes" -gt 0 ]; then st=OK; else st=EMPTY; reason=EMPTY; fi
+  elif [ "$rc" = 126 ]; then st=DENIED; reason=BLOCKED_BY_POLICY
+  elif [ "$bytes" -gt 0 ]; then st=OK; note="exit code $rc (output kept)"
+  elif "$BB" grep -qiE 'permission denied|operation not permitted' "$e" 2>/dev/null; then st=DENIED; reason=PERMISSION_DENIED
+  elif [ ! -s "$e" ]; then st=EMPTY; reason=EMPTY; note="exit code $rc, no output and no error message"
+  else st=FAILED; reason=EXIT_NONZERO; note="exit code $rc"; fi
+  # crashed programs: a server program run through srv, or the item's own command, killed by a crash signal
+  crash=""; creason=SERVER_TOOL_CRASHED
+  [ -s "$ITEM_SRVLOG.crash" ] && crash=$("$BB" awk -F'\t' '{s=$2-128; n=(s==4?"SIGILL":s==5?"SIGTRAP":s==6?"SIGABRT":s==7?"SIGBUS":s==8?"SIGFPE":s==11?"SIGSEGV":s==31?"SIGSYS":"signal " s); p=$1; sub(/.*\//,"",p); k=p " (" n ")"; if(!(k in seen)){seen[k]=1; o=o (o==""?"":", ") k}} END{print o}' "$ITEM_SRVLOG.crash")
+  if [ -z "$crash" ] && [ "$typ" = CMD ]; then case "$rc" in 132|133|134|135|136|139|159) crash="command (signal $((rc-128)))"; creason=TOOL_CRASHED;; esac; fi
+  if [ -n "$crash" ] && [ "$reason" != INTERRUPTED ]; then
+    case "$st" in OK|EMPTY|SKIPPED|"NOT FOUND") st=FAILED; reason=$creason; note="crashed: $crash"; [ "$rc" != 0 ] && note="$note; exit code $rc"; [ "$bytes" -gt 0 ] && note="$note; partial output kept";;
+      *) note="${note:+$note; }crashed: $crash";; esac
+  fi
+  [ "${EXTENDED_S:-0}" -gt 0 ] && note="${note:+$note; }time limit extended by operator: +$((EXTENDED_S/60)) min"
+  if [ -s "$e" ]; then
+    first=$("$BB" grep -v '^c0f-copy: done' "$e" | "$BB" head -n 1 | "$BB" cut -c1-160)
+    case "$st" in FAILED|DENIED|TIMEOUT|"NOT FOUND") [ -n "$first" ] && note="${note:+$note; }$first";; esac
+    if [ "$out" != - ] && [ "$typ" != COPY ] && [ -n "$first" ]; then cp "$e" "$o.stderr.txt" 2>/dev/null; fi
+  fi
+  [ -f "$o" ] && [ ! -s "$o" ] && rm -f "${o:?}"
+  [ "$typ" = COPY ] && rm -f "${o:?}"
+  [ "$out" = - ] && [ -f "$o" ] && [ -s "$o" ] && { mkdir -p "$T/item-stdout"; mv "$o" "$T/item-stdout/$id.txt"; }
+  rec "$st" "${reason:--}" "$rc" "$s0" "$s1" "$dur" "$bytes" "$integ" "$note"
+  case "$st" in
+    FAILED|TIMEOUT|DENIED) printf '[C0F] WARN %s %s %s: %s\n' "$id" "$st" "($reason)" "$(printf '%s' "$note" | "$BB" cut -c1-110)"; C0F_WARNINGS=$((C0F_WARNINGS+1));;
+    "NOT FOUND") [ "$reason" = EXPECTED_BUT_MISSING ] && { printf '[C0F] WARN %s EXPECTED_BUT_MISSING: %s\n' "$id" "$note"; C0F_WARNINGS=$((C0F_WARNINGS+1)); };;
+  esac
+  log "$id $st ${reason:--} rc=$rc ${dur}ms ${bytes}B $note"
+}
+
+# ------------------------------------------------------------------------------------------------
+# 10. Collection
+# ------------------------------------------------------------------------------------------------
+say "Collection started $RUN_START_UTC ($NITEMS catalog items). Progress is also written to $C0F_LOG"
+i=0; lastdom=""
+while IFS="$TAB" read -r id dom ord typ opt req tool cmd out to rest <&3; do
+  case "$id" in id|''|'#'*) continue;; esac
+  i=$((i+1))
+  if [ "$C0F_INT" = 1 ] && [ -z "$C0F_STOP" ]; then C0F_STOP=INTERRUPTED; warn "interrupted by operator: the remaining $((NITEMS - i + 1)) items are skipped, the collected data is archived (Ctrl+C again during archiving stops the archive)"; fi
+  if [ -z "$C0F_STOP" ]; then
+    if ! hard_ok; then C0F_STOP=NO_SPACE; warn "free space below the hard floor ($((min/1024)) MB): collection stops cleanly (NO_SPACE)"
+    elif [ "$LOWSPACE" = 0 ] && ! space_ok; then LOWSPACE=1
+      warn "free space below the reserve ($((min/1024)) MB): large items (RAM, swap, process dumps, pcap, timeline, e2image, container export, DB files) are skipped from now on; all other items continue"; fi
+  fi
+  if [ "$dom" != "$lastdom" ] && [ -z "$C0F_STOP" ]; then printf '[C0F] (%d/%d) %s %s\n' "$i" "$NITEMS" "$dom" "$(domdir "$dom")"; lastdom=$dom; fi
+  run_item
+done 3< "$KIT/catalog.tsv"
+trap 'C0F_INT2=1' INT TERM
+RUN_END_UTC=$(utc); RUN_END_LOCAL=$(date '+%Y-%m-%d %H:%M:%S %z')
+
+# ------------------------------------------------------------------------------------------------
+# 11. Finalize: kit re-check, custody files, manifest, archive
+# ------------------------------------------------------------------------------------------------
+say "Collection finished. Writing manifest, report and chain of custody ..."
+pcap_cleanup 2>/dev/null
+# kit re-check (did anything in the kit change while we ran?)
+KIT_CHANGED=""
+printf '%s' "$KIT_ROWS" | while IFS=, read -r p st exp found act; do
+  [ "$st" = OK ] || continue
+  now=$("$BB" sha256sum "$KIT/$p" 2>/dev/null | "$BB" cut -c1-64)
+  [ "$now" = "$exp" ] || echo "$p"
+done > "$T/kit-changed.txt"
+if [ -s "$T/kit-changed.txt" ]; then KIT_CHANGED=YES; warn "kit files changed DURING the run: $(tr '\n' ' ' < "$T/kit-changed.txt")"; worse COMPROMISED; fi
+# foreign/modified kit binaries are copied as evidence (never executed)
+if [ -n "$KIT_EXTRA" ] || printf '%s' "$KIT_ROWS" | "$BB" grep -q ',MODIFIED,'; then
+  mkdir -p "$CUST/kit-tampered"
+  for f in $KIT_EXTRA $(printf '%s' "$KIT_ROWS" | "$BB" awk -F, '$2=="MODIFIED"{print ENVIRON["KIT"]"/"$1}'); do cp "$f" "$CUST/kit-tampered/${f##*/}.bin" 2>/dev/null && chmod 600 "$CUST/kit-tampered/${f##*/}.bin"; done
+fi
+{ echo "path,status,expected_sha256,found_sha256,action"; printf '%s' "$KIT_ROWS"; } > "$CUST/kit-integrity.csv"
+cp "$T/kit-selftest.csv" "$CUST/kit-selftest.csv" 2>/dev/null
+cp "$ITEMS" "$CUST/items.tsv"
+
+if [ "$C0F_STOP" = INTERRUPTED ]; then RUN_STATUS=INTERRUPTED
+elif [ "$C0F_STOP" = NO_SPACE ]; then RUN_STATUS="PARTIAL (stopped: NO_SPACE)"
+elif [ $((N_FAIL + N_TO + N_DEN)) -gt 0 ]; then RUN_STATUS="PARTIAL ($((N_FAIL + N_TO + N_DEN)) failed)"
+else RUN_STATUS=COMPLETE; fi
+[ "$LOWSPACE" = 1 ] && [ -z "$C0F_STOP" ] && { [ "$RUN_STATUS" = COMPLETE ] && RUN_STATUS="PARTIAL (low disk space: $N_NOTRUN large items not run)" || RUN_STATUS="${RUN_STATUS%)}; low disk space: $N_NOTRUN large items not run)"; }
+
+TRUSTED_END=""; NOTE_END=""
+if [ "$OPT_YES" = 0 ] && [ "${C0F_INT2:-0}" = 0 ]; then
+  ask "Current time from a TRUSTED clock again (UTC 'YYYY-MM-DD HH:MM:SS', Enter to skip): " ""; TRUSTED_END=$REPLY
+  [ -n "$TRUSTED_END" ] && TRUSTED_END_SERVER=$(utc)
+  ask "Examiner closing note (Enter to skip): " ""; NOTE_END=$REPLY
+fi
+export RUN_STATUS KIT_INTEGRITY KIT_SIG KIT_SUMS_SHA KIT_PUBKEY KIT_CHANGED HOST HOST_RAW HOST_IP NAME DISPLAY_NAME CASE EXAMINER
+export RUN_START_UTC RUN_END_UTC RUN_START_LOCAL RUN_END_LOCAL TRUSTED_START TRUSTED_START_SERVER TRUSTED_END TRUSTED_END_SERVER NOTE_START NOTE_END
+export C0F_INVOKER C0F_EUSER C0F_EUID OUTDIR WORKBASE OUT_FSTYPE OUT_EXTERNAL ORIG_ARGS PW_SRC OPT_FORCE APPLET_MODE HOST_NOTE
+export N_OK N_EMPTY N_NF N_FAIL N_TO N_DEN N_SKIP NITEMS C0F_WARNINGS N_NOTRUN LOWSPACE
+cp "$C0F_LOG" "$CUST/collector.log"
+write_custody_files "$OUTROOT" "$T"         # manifest.csv, failures.csv, not-collected.csv, tools-used.csv, report.txt, chain-of-custody.txt
+log "custody files written"; cp "$C0F_LOG" "$CUST/collector.log"
+
+# archive -------------------------------------------------------------------------------------------
+say "Creating encrypted archive (7-Zip AES-256, file names encrypted) ..."
+ARC=""; ARC_TOOL=""; ARC_NOTE=""
+SPLIT=""; case "$("$BB" stat -f -c %T "$OUTDIR" 2>/dev/null)" in msdos|vfat|fat) SPLIT="-v3900m"; ARC_NOTE="FAT filesystem: archive split into 3.9 GB volumes (.7z.001, .7z.002, ...)";; esac
+z=""; for c in "$BIN/7zzs"; do case " $KIT_BLOCKED " in *" 7zzs "*) ;; *) [ -x "$c" ] && z=$c;; esac; done
+[ -z "$z" ] && for c in 7zz 7z 7za; do p=$(srv_path "$c") && { z=$p; ARC_NOTE="${ARC_NOTE:+$ARC_NOTE; }kit 7zzs not usable: server $p used (UNTRUSTED_TOOL)"; break; }; done
+if [ -n "$z" ]; then
+  ARC="$OUTDIR/$NAME.7z"
+  # The archive needs up to the size of the working folder again. 7-Zip is watched: if free space on the output
+  # filesystem falls below the hard floor (hard_ok), it is stopped and the partial archive
+  # removed, so the examined server's disk is never filled. The working folder is then kept (NOT encrypted).
+  wk=$(du -sk "$WORKBASE/$NAME" 2>/dev/null | "$BB" awk '{print $1}'); fk=$(df -Pk "$WORKBASE" 2>/dev/null | "$BB" awk 'NR==2{print $4}')
+  [ -n "$wk" ] && [ -n "$fk" ] && [ "$wk" -ge "$fk" ] && warn "working folder ($((wk/1024)) MB) is larger than the free space ($((fk/1024)) MB): the archive fits only if it compresses well; 7-Zip is stopped if the hard floor is reached"
+  ( cd "$WORKBASE" && exec "$z" a -t7z -mx=5 -mhe=on -snl -bd -bb0 $SPLIT "-p$PW" "$ARC" "$NAME" ) >> "$C0F_LOG" 2>&1 &
+  zpid=$!; ZSTOP=""
+  while kill -0 "$zpid" 2>/dev/null; do
+    if [ "${C0F_INT2:-0}" = 1 ]; then ZSTOP=INTERRUPTED; elif ! hard_ok; then ZSTOP=NO_SPACE; fi
+    if [ -n "$ZSTOP" ]; then kill -TERM "$zpid" 2>/dev/null; "$BB" sleep 2; kill -KILL "$zpid" 2>/dev/null; break; fi
+    "$BB" sleep 2
+  done
+  wait "$zpid" 2>/dev/null; zrc=$?
+  ARC_TOOL="$z"
+  if [ -n "$ZSTOP" ]; then
+    rm -f "${ARC:?}" "${ARC:?}".[0-9][0-9][0-9]; trc=1
+    case "$ZSTOP" in
+      NO_SPACE) warn "archive STOPPED: free disk space reached the hard floor. Partial archive removed; working folder kept (NOT encrypted): $WORKBASE/$NAME. Copy it to external media and archive it there."
+                ARC_NOTE="${ARC_NOTE:+$ARC_NOTE; }stopped: disk space hard floor reached";;
+      *) warn "archive STOPPED by the operator. Partial archive removed; working folder kept (NOT encrypted): $WORKBASE/$NAME"
+         ARC_NOTE="${ARC_NOTE:+$ARC_NOTE; }stopped by operator";;
+    esac
+    RUN_STATUS="PARTIAL (archive not created: $ZSTOP)"
+  else
+    [ -n "$SPLIT" ] && [ -f "$ARC.001" ] && ARC="$ARC.001"
+    if [ "$zrc" != 0 ] && [ "$zrc" != 1 ]; then warn "7-Zip returned $zrc"; fi
+    "$z" t "-p$PW" -bd "$ARC" >> "$C0F_LOG" 2>&1; trc=$?
+  fi
+else
+  ARC="$OUTDIR/$NAME.tar"; ARC_TOOL="busybox tar (NO ENCRYPTION)"
+  warn "no 7-Zip available: archive is NOT encrypted"
+  ( cd "$WORKBASE" && tar -cf "$ARC" "$NAME" ) >> "$C0F_LOG" 2>&1; trc=$?; ARC_NOTE="ENCRYPTION=NONE"
+fi
+ARC_SHA=""; ARC_MD5=""
+if [ -f "$ARC" ]; then
+  for v in "${ARC%.001}"*; do [ -f "$v" ] || continue
+    printf '%s  %s\n' "$(sha256sum "$v" | cut -c1-64)" "${v##*/}"; done > "$OUTDIR/$NAME.sha256"
+  for v in "${ARC%.001}"*; do [ -f "$v" ] || continue
+    printf 'MD5 %s  %s\n' "$(md5sum "$v" | cut -c1-32)" "${v##*/}"; done >> "$OUTDIR/$NAME.sha256"
+  ARC_SHA=$("$BB" head -n 1 "$OUTDIR/$NAME.sha256" | "$BB" cut -c1-64)
+  ARC_SIZE=$(du -ck "${ARC%.001}"* 2>/dev/null | "$BB" tail -n 1 | "$BB" awk '{print $1}')
+fi
+cp "$CUST/report.txt" "$OUTDIR/$NAME.report.txt"; cp "$CUST/chain-of-custody.txt" "$OUTDIR/$NAME.custody.txt"
+{ echo; echo "ARCHIVE (outside the archive; the hash of an archive cannot be stored inside itself)"
+  echo "  file    : $ARC"; echo "  tool    : $ARC_TOOL ${ARC_NOTE:+($ARC_NOTE)}"; echo "  sha256  : $ARC_SHA"
+  echo "  test    : $( [ "${trc:-1}" = 0 ] && echo 'OK (archive opened and every file checked with the password)' || echo "FAILED (code ${trc:-?}) - working folder kept")"
+  echo "  password: $PW_SRC$( [ "$PW_SRC" = "short hostname" ] && echo " = $PW")"; } | tee -a "$OUTDIR/$NAME.report.txt" >> "$OUTDIR/$NAME.custody.txt"
+chmod 600 "$OUTDIR/$NAME".* 2>/dev/null
+
+if [ "${trc:-1}" = 0 ] && [ "$OPT_KEEP" = 0 ]; then rm -rf "${WORKBASE:?}"; WORK_NOTE="working folder removed after a successful archive test"
+else WORK_NOTE="working folder KEPT: $WORKBASE"; fi
+rm -f "${LOCKF:?}"
+
+# ------------------------------------------------------------------------------------------------
+# 12. End notice
+# ------------------------------------------------------------------------------------------------
+echo
+echo "[C0F] KIT INTEGRITY: $KIT_INTEGRITY${KIT_CHANGED:+ (KIT CHANGED DURING RUN)}"
+echo "[C0F] COLLECTION FINISHED - status: $RUN_STATUS"
+if [ -n "$ARC_SHA" ] && [ "${trc:-1}" = 0 ]; then
+  echo " Evidence archive : $ARC   size: $("$BB" awk -v k="${ARC_SIZE:-0}" 'BEGIN{ if (k>=1048576) printf "%.2f GB", k/1048576; else printf "%.1f MB", k/1024 }')"
+  echo " SHA-256          : $ARC_SHA"
+elif [ -n "$ARC_SHA" ]; then
+  echo " Evidence archive : $ARC   ARCHIVE TEST FAILED (code ${trc:-?}) - do not rely on it; use the working folder"
+  echo " SHA-256          : $ARC_SHA"
+else
+  echo " Evidence archive : NOT CREATED${ARC_NOTE:+ ($ARC_NOTE)}"
+  echo " Evidence folder  : $WORKBASE/$NAME   (NOT encrypted: copy it to external media and archive it there)"
+fi
+echo " Report (readable): $OUTDIR/$NAME.report.txt"
+echo " Custody summary  : $OUTDIR/$NAME.custody.txt"
+if [ "$PW_SRC" = "short hostname" ]; then echo " Archive password : the short hostname of this server: $PW"; else echo " Archive password : set by $PW_SRC"; fi
+echo " Collected: $N_OK   Empty: $N_EMPTY   Not found / not applicable: $((N_NF + N_SKIP - N_NOTRUN))   Not run (no space / interrupted): $N_NOTRUN   Failed/timeout/denied: $((N_FAIL + N_TO + N_DEN))   Warnings: $C0F_WARNINGS"
+echo " $WORK_NOTE"
+echo
+echo " NEXT STEPS"
+if [ "$OUT_EXTERNAL" = YES ]; then
+  echo " 1. Safely unmount the media that holds $OUTDIR"
+else
+  echo " 1. Download the whole folder $OUTDIR/ , for example from your workstation:"
+  echo "      scp -r <user>@$HOST_IP:\"$OUTDIR\" ."
+fi
+echo " 2. Verify the archive hash after download (sha256sum, or on Windows: certutil -hashfile <file> SHA256)."
+echo " 3. Record the hash and the transfer in the chain-of-custody form."
+echo " 4. The archive contains password hashes, keys, tokens and personal data. Store it in a restricted location."
+echo " 5. If the output is on the examined system, remove it only after the copy is verified (note the deletion in the form)."
+closing_banner
+case "$RUN_STATUS" in COMPLETE) exit 0;; INTERRUPTED) exit 2;; *) exit 1;; esac

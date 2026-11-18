@@ -1,0 +1,77 @@
+# D03 memory: RAM first (most volatile), suspicious process memory after the process list, swap/crash dumps late.
+@phase 200
+[D03-001] FUNC kit 7200
+cmd: ram_dump
+out: ram
+opt: RAM
+purpose: Full physical memory image with AVML (Microsoft, static) in LiME format.
+expect: ram/memory.lime (about the size of installed RAM) and ram/avml.log.
+empty: SKIPPED on armv7 (no AVML build) or when the kernel refuses (/dev/crash, /proc/kcore and /dev/mem all blocked).
+value: Analysed offline with Volatility 3: hidden processes, injected code, kernel rootkits, keys, command lines.
+changes: Reads all RAM; uses CPU and disk; may trigger EDR alerts.
+sensitive: yes
+ref: RFC3227; NIST800-86; draft-14.1; https://github.com/microsoft/avml
+
+[D03-002] CMD kit 10
+cmd: echo "ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"; echo "lockdown=$(cat /sys/kernel/security/lockdown 2>/dev/null || echo absent)"; echo "kptr_restrict=$(cat /proc/sys/kernel/kptr_restrict 2>/dev/null)"; ls -l /dev/crash /dev/mem /proc/kcore 2>&1
+out: memory-access-policy.txt
+purpose: Kernel settings that allow or forbid memory acquisition.
+expect: ptrace_scope 0-3, lockdown [none] or integrity/confidentiality, device nodes.
+empty: Never empty.
+value: Explains a refused RAM or process dump (not a tool failure).
+ref: draft-37.3 no.32
+
+@phase 350
+[D03-010] FUNC kit 3600
+cmd: proc_memdumps
+out: process-dumps
+opt: PDUMP
+purpose: Dump memory of suspicious processes (deleted executable, running from /tmp,/dev/shm,/var/tmp, memfd:, fake kernel threads, executable not found on disk).
+expect: Per process: <pid>.mem, .maps, .regions.tsv, .info.txt plus selection.txt explaining why each PID was chosen.
+empty: EMPTY when no process matches the criteria (normal on a clean host).
+value: Fileless malware and unpacked code exist only in memory.
+changes: Reads target process memory (no attach, no stop).
+sensitive: yes
+ref: draft-20.2; UAC:process_memory
+
+[D03-011] FUNC kit 600
+cmd: shell_memory_history
+out: shell-memory
+opt: PDUMP
+purpose: Recover unsaved shell history from the memory of running interactive shells (bash/zsh/sh/ash).
+expect: Per shell: pid, user, tty and command-like strings found in its heap.
+empty: EMPTY when no interactive shell is running.
+value: Commands typed in still-open shells are not yet in .bash_history.
+sensitive: yes
+ref: draft-20.2; SANS-FOR577
+
+@phase 2400
+[D03-020] FUNC kit 7200
+cmd: swap_copy
+out: swap
+opt: SWAP
+purpose: Copy active swap devices/files (raw).
+expect: swap/<name>.swap per active swap area and swap/swaps.txt.
+empty: EMPTY when no swap is active.
+value: Swap holds memory pages of past processes (passwords, commands, malware fragments).
+sensitive: yes
+ref: draft-20.2; RFC3227
+
+[D03-021] COPY kit 1800
+cmd: -R /var/crash /var/lib/systemd/coredump /var/spool/abrt /var/lib/apport/coredump /var/tmp/abrt
+purpose: Crash dumps and core files kept by the system.
+expect: core.* / *.crash / *.zst files and their metadata.
+empty: NOT_FOUND when no crash handler is installed.
+value: Crashes of exploited services contain the exploit payload and attacker memory.
+sensitive: yes
+ref: draft-20.2; UAC:coredump
+
+[D03-022] CMD server 30
+cmd: srv coredumpctl list --no-pager 2>&1
+out: coredumpctl.txt
+req: has coredumpctl
+purpose: systemd-coredump index (which program crashed, when, signal).
+expect: Table TIME PID UID GID SIG COREFILE EXE.
+empty: 'No coredumps found' is normal.
+value: Repeated crashes of a network service = exploitation attempts.
+ref: man:coredumpctl(1)

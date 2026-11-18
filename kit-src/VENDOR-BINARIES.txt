@@ -1,0 +1,22 @@
+Vendor binaries shipped unchanged (official static releases, hash/signature verified at download)
+
+component                 files in bin/<arch>/   license      official source
+docker CLI 29.9.3         docker                 Apache-2.0   https://download.docker.com/linux/static/stable/
+containerd 2.4.2 (ctr)    ctr                    Apache-2.0   same Docker static archive (containerd project)
+runc 1.5.2                runc                   Apache-2.0   same Docker static archive (opencontainers/runc)
+kubectl 1.37.2            kubectl                Apache-2.0   https://dl.k8s.io/release/
+crictl 1.37.0             crictl                 Apache-2.0   https://github.com/kubernetes-sigs/cri-tools/releases
+jq 1.8.2                  jq                     MIT          https://github.com/jqlang/jq/releases
+AVML 0.21.0               avml                   MIT          https://github.com/microsoft/avml/releases
+7-Zip 26.05 (7zzs)        7zzs                   LGPL-2.1 + unRAR restriction (see 7-Zip-26.05--License.txt)   https://www.7-zip.org/
+
+Apache-2.0 text: Apache-2.0.txt. MIT texts: jq-1.8.2--COPYING, avml-0.21.0--LICENSE.
+
+Programs built from source for this kit are listed in README.txt (section 12). Their license files are in this
+folder, named <source package>--<license file>. All programs are statically linked against musl libc (license:
+musl-libc--COPYRIGHT).
+
+Source code (GPL/LGPL obligations): every C0F release publishes, next to the kit, the archive
+C0F-<version>-third-party-sources.tar with the exact, unmodified upstream source archives used for this kit
+(SHA-256 in BUILDINFO.txt), the Debian chkrootkit patch set, the 7-Zip 26.05 source, and the C0F build scripts and
+patches. The same files are also provided on request by the C0F maintainers.

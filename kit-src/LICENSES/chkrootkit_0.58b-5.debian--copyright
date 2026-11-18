@@ -1,0 +1,134 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: chkrootkit
+Source: https://www.chkrootkit.org/
+
+Files: *
+Copyright: 1996-2023 Nelson Murilo <nmurilo@gmail.com>, AMS Foundation and others
+License: BSD-2-Clause
+Comment: The upstream sources state that the Authors are
+   Nelson Murilo <nmurilo@gmail.com> (main author)
+   Klaus Steding-Jessen <jessen@cert.br> (co-author)
+  The License is stated in the COPYRIGHT file distributed by upstream,
+  Some files have other licenses and copyright statements, as listed below.
+
+Files: chkdirs.c
+Copyright: Copyright (C) 2002-2003 Hal Pomeranz <hal@deer-run.com> and Deer Run Assoc
+License: permissive
+  All rights reserved.  Permission granted to freely redistribute and update
+  as long as this Copyright notice is preserved.  No warranty expressed or
+  implied.
+
+Files: chklastlog.c README.chklastlog chkwtmp.c README.chkwtmp
+Copyright: Copyright (c) DFN-CERT, Univ. of Hamburg 1994
+License: BSD-2-Clause
+Comment: There is no explicit license statement in these files, upstream's
+  COPYRIGHT file states the BSD-2-Clause license
+
+Files: chkproc.c
+Copyright: (C) Nelson Murilo - 2004/09/13
+License: BSD-2-Clause
+Comment: There is no explicit license statement in the file, upstream's
+ COPYRIGHT file states the BSD-2-Clause license.
+ The file states this is a C port from chkproc.pl code from
+ Klaus Steding-Jessen <jessen@nic.br> and Cristine Hoepers <cristine@nic.br>
+
+Files: chkutmp.c
+Copyright: 2004 Jeremy Miller <jmtgzd@gmail.com>
+License: GPL-2+
+
+Files: ifpromisc.c
+Copyright: Copyright 1997-2021 (C) Pangeia Informatica
+Comment:
+  The file states that the Author is Nelson Murilo <nmurilo@gmail.com>
+  and that this is a simple subset of Fred N. van Kempen,
+  <waltje@uwalt.nl.mugnet.org>'s ifconfig and iplink code: this appears
+  to mean that some of the code is based on ifconfig which is licensed
+  under GPL-2+ (see the net-tools package)
+License: GPL-2+
+
+Files: strings.c
+Copyright: (c) 2002, Sean D. True, WebReply.Com, Inc.
+License: Python
+Comment:
+  Use freely, under the Python license In short: use with or without
+  attribution as you like, but no warranty of fitness, suitability, or
+  anything else is given!
+
+Files: debian/*
+Copyright: 2021-2025 Richard Lewis <richard.lewis.debian@googlemail.com>
+           2017-2023 Marcos Fouces <marcos@debian.org>
+           2015 Artur Rona <ari-tczew@ubuntu.com>
+           2015 Raphaël Hertzog <hertzog@debian.org>
+           2008-2015 Giuseppe Iuculano <iuculano@debian.org>
+           2007,2011 Christian Perrier <bubulle@debian.org>
+           2008 Francois Marier <francois@debian.org>
+           2008 Mike Forbes <mike@nothing.net.nz>
+           2002-2006 lantz moore <lmoore@debian.org>
+           2001-2002 Yotam Rubin <yotam@makif.omer.k12.il>
+License: BSD-2-Clause
+
+Files: debian/patches/ifpromisc.patch
+Copyright: 2024 Richard Lewis <richard.lewis.debian@googlemail.com>
+License: GPL-2+
+Comment: ifpromisc.c is GPL-2+, so this patch is also that (to the
+ extent to which it is copyrightable).
+
+License: BSD-2-Clause
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+ .
+   1. Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+ .
+   2. Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+ .
+   THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+   ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+   IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+   ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+   FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+   OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+   HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+   LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+   OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+   SUCH DAMAGE.
+
+License: GPL-2+
+ This package is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License version 2 as
+ published by the Free Software Foundation, or (at your option) any
+ later version.
+ .
+ This package is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ You should have received a copy of the GNU General Public License
+ along with this package; if not, write to the Free Software
+ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+Comment:
+ On Debian systems, the complete text of the GNU General
+ Public License can be found in `/usr/share/common-licenses/GPL-2'.
+
+License: Python
+ This module is free software, and you may redistribute it and/or
+ modify it under the same terms as Python itself, so long as this
+ copyright message and disclaimer are retained in their original
+ form.
+ .
+ IN NO EVENT SHALL THE AUTHOR BE LIABLE TO ANY PARTY FOR DIRECT,
+ INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+ OUT OF THE USE OF THIS CODE, EVEN IF THE AUTHOR HAS BEEN ADVISED
+ OF THE POSSIBILITY OF SUCH DAMAGE.
+ .
+ THE AUTHOR SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT
+ NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ FITNESS FOR A PARTICULAR PURPOSE.  THE CODE PROVIDED HEREUNDER
+ IS ON AN "AS IS" BASIS, AND THERE IS NO OBLIGATION WHATSOEVER TO
+ PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR
+ MODIFICATIONS.

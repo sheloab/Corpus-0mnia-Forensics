@@ -1,0 +1,126 @@
+# D16 applications/user artefacts and D17 desktop/GUI
+@phase 1400
+[D16-001] FUNC kit 600
+cmd: shell_histories
+out: shell-history
+purpose: Shell and REPL histories of every account incl. root and system accounts: bash, zsh, fish, ash, sh, ksh, tcsh, python, node, mysql, psql, sqlite, redis, less, vim (viminfo), wget-hsts; plus HISTFILE tampering checks.
+expect: shell-history/<user>/... copies and history-tampering.txt (HISTFILE=/dev/null, symlinks to /dev/null, zero size, unset in rc files).
+empty: EMPTY when no history exists (suspicious for admin accounts).
+value: Commands typed by users and attackers; tampering is itself an indicator.
+sensitive: yes
+ref: draft-13.3; UAC:bash_history
+
+[D16-002] FUNC kit 600
+cmd: user_app_artifacts
+out: user-apps
+purpose: Per user: ~/.aws, ~/.azure, ~/.config/gcloud, ~/.kube, ~/.docker/config.json, ~/.gnupg (key list only), ~/.netrc, ~/.git-credentials, ~/.gitconfig, ~/.config/rclone, FileZilla, ~/.wget-hsts, ~/.npmrc, ~/.pypirc, recently-used.xbel, Trash info.
+expect: user-apps/<user>/... copies.
+empty: EMPTY when none exist.
+value: Cloud and registry credentials an attacker can steal or used to pivot; transfer tool configs used for exfiltration.
+sensitive: yes
+ref: draft-14.9; draft-31.1
+
+[D16-003] FUNC kit 600
+cmd: remote_access_tools
+out: remote-access-tools
+purpose: Remote access/transfer tools and their logs: AnyDesk, TeamViewer, RustDesk, NoMachine, Chrome Remote Desktop, ScreenConnect, Splashtop, ngrok, frp, chisel, cloudflared, tailscale, rclone, mega, gsutil.
+expect: Config/log copies plus found.txt with paths and running state.
+empty: EMPTY when none are present.
+value: Commercial remote tools and tunnels are a top ransomware access/exfil method.
+sensitive: yes
+ref: draft-30.3; SANS-FOR577
+
+[D16-004] FUNC kit 300
+cmd: dev_tool_artifacts
+out: dev-tools
+purpose: Configuration and logs of remote IDE servers and notebooks (~/.vscode-server, Jupyter runtime and config).
+expect: Copies of settings/log/extension lists (no large caches).
+empty: EMPTY when none are present.
+value: Remote IDE sessions run commands on the server; tokens and connection details stored on disk.
+sensitive: yes
+ref: draft-30.3
+
+[D16-005] FUNC kit 120
+cmd: tmux_screen_buffers
+out: multiplexer
+purpose: tmux sessions and paste buffers per user socket; GNU screen sessions and /tmp/screen-exchange.
+expect: Session lists and buffer contents.
+empty: EMPTY when no tmux/screen runs.
+value: Copy/paste buffers and detached attacker sessions.
+changes: Talks to the user's tmux server (read-only commands).
+sensitive: yes
+ref: draft-13.9
+
+@phase 1500
+[D17-001] FUNC kit 60
+cmd: gui_detect
+out: gui-sessions.txt
+purpose: Detect graphical sessions: X11 sockets, Wayland sockets, display managers, xrdp/VNC/NoMachine, graphical.target, and the XAUTHORITY of each display.
+expect: One line per display/session with owner and auth file.
+empty: 'no graphical session' on servers (domain stays NOT_APPLICABLE).
+value: Tells which desktop evidence exists.
+ref: draft-31.1
+
+[D17-002] FUNC kit 300
+cmd: x11_clipboard
+out: clipboard
+opt: CLIPBOARD
+req: ls /tmp/.X11-unix/X* >/dev/null 2>&1
+purpose: Clipboard of every X11 display (CLIPBOARD, PRIMARY, SECONDARY; every format; owner PID via X-Resource) with c0f-x11; Wayland via the server's wl-paste when present.
+expect: clipboard/<display>/clipboard.tsv and one file per format.
+empty: NO_OWNER rows when nothing was copied.
+value: Passwords, commands or data an attacker or user just copied.
+changes: Creates one temporary InputOnly window; asks the owning application for its data.
+sensitive: yes
+ref: draft-13.9; draft-40.2
+
+[D17-003] FUNC kit 300
+cmd: x11_windows
+out: windows
+req: ls /tmp/.X11-unix/X* >/dev/null 2>&1
+purpose: Window tree of every X11 display: titles, classes, command, geometry, mapped state, owner PID (X-Resource and _NET_WM_PID).
+expect: windows/<display>.tsv.
+empty: Few windows on idle sessions.
+value: What was on screen and which program owns each window.
+ref: draft-31.1
+
+[D17-004] FUNC kit 300
+cmd: x11_screenshots
+out: screenshots
+opt: SCREENSHOT
+req: ls /tmp/.X11-unix/X* >/dev/null 2>&1
+purpose: Screenshot (PNG) of every X11 display.
+expect: screenshots/<display>.png.
+empty: Locked or blank screens produce dark images.
+value: Visual evidence of open applications and attacker activity.
+sensitive: yes
+ref: draft-31.1
+
+[D17-005] FUNC kit 1800
+cmd: browser_artifacts
+out: browsers
+purpose: Copy browser profiles' evidence files per user: Firefox (places, cookies, formhistory, logins, extensions), Chrome/Chromium/Brave/Edge/Opera/Vivaldi (History, Cookies, Login Data, Web Data, Preferences, Extensions list).
+expect: browsers/<user>/<browser>/<profile>/... copies.
+empty: EMPTY on servers without browsers.
+value: Visited URLs, downloads (malware source), saved logins, malicious extensions.
+sensitive: yes
+ref: draft-31.1
+
+[D17-006] FUNC kit 1800
+cmd: desktop_user_artifacts
+out: desktop-users
+purpose: Per user: recently-used.xbel, Trash (files + info), thumbnail cache, autostart, GNOME/KDE MRU, keyrings/KWallet files, Thunderbird profile metadata, messengers (Slack/Telegram/Signal/Discord/Teams) config folders without media caches.
+expect: desktop-users/<user>/... copies.
+empty: EMPTY on servers.
+value: Files opened/deleted/viewed (thumbnails survive deletion); communication apps.
+sensitive: yes
+ref: draft-31.1
+
+[D17-007] COPY kit 600
+cmd: -R /var/log/Xorg.*.log /var/log/xrdp*.log /var/log/xrdp-sesman.log /var/log/lightdm /var/log/gdm /var/log/gdm3 /var/log/sddm.log /etc/xrdp /etc/gdm /etc/gdm3 /etc/lightdm /etc/sddm.conf /etc/sddm.conf.d /etc/X11/xorg.conf /etc/X11/xorg.conf.d /etc/tigervnc /etc/vnc /var/lib/AccountsService/users /var/lib/bluetooth /etc/NetworkManager/system-connections /var/lib/udisks2 /var/spool/cups /etc/cups
+purpose: Display manager, remote desktop, Bluetooth, Wi-Fi, removable media and printing artefacts.
+expect: Logs and configs of the desktop stack.
+empty: NOT_FOUND on servers.
+value: Remote desktop logins, paired devices, Wi-Fi networks, printed documents.
+sensitive: yes
+ref: draft-31.1

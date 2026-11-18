@@ -1,0 +1,139 @@
+# D04 processes (volatile, right after RAM)
+@phase 300
+[D04-001] CMD kit 60
+cmd: ps -eo pid,ppid,pgid,sid,tty,user:32,uid,gid,lstart,etimes,stat,pcpu,pmem,vsz,rss,nlwp,wchan:32,comm,args --sort=pid -ww
+out: ps-full.txt
+purpose: All processes with parent, owner, start time, state and full command line.
+expect: One line per process; PID 1 is init/systemd.
+empty: Never empty.
+value: Unknown processes, odd parents (web server spawning a shell), long-running tools started by an attacker.
+ref: RFC3227; SANS-FOR577; UAC:ps
+
+[D04-002] CMD kit 60
+cmd: ps auxwwf
+out: ps-tree.txt
+purpose: Process tree (forest view).
+expect: Indented tree under PID 1 and kthreadd.
+empty: Never empty.
+value: Shows which service started which child (e.g. nginx -> sh -> curl).
+ref: UAC:ps
+
+[D04-003] CMD kit 60
+cmd: ps -eLo pid,tid,user,stat,wchan:32,comm -ww
+out: threads.txt
+purpose: All threads of all processes.
+expect: One line per thread.
+empty: Never empty.
+value: Injected threads with unusual names.
+ref: UAC:ps
+
+[D04-004] FUNC kit 900
+cmd: proc_details
+out: proc
+purpose: Per-PID snapshot from /proc: cmdline, environ, status, exe link + hash, cwd, root, maps, fd list, cgroup, namespaces, limits, loginuid, sessionid, mountinfo id.
+expect: proc/<pid>/... files and proc/summary.tsv (one row per process).
+empty: Never empty.
+value: Deleted executables, LD_PRELOAD in environ, processes in foreign namespaces, hidden working folders.
+sensitive: yes
+ref: draft-3; UAC:proc
+
+[D04-005] FUNC kit 1800
+cmd: proc_exe_copies
+out: exe-copies
+purpose: Copy the executable of processes whose binary is deleted, in a temp folder, memfd or not owned by any package path.
+expect: exe-copies/<pid>_<name>.bin (mode 600) and index.tsv with SHA-256.
+empty: EMPTY when no process matches (normal).
+value: Fileless/self-deleting malware binary recovered from /proc/<pid>/exe.
+sensitive: yes
+ref: draft-3; SANS-FOR577
+
+[D04-006] CMD kit 300
+cmd: lsof -n -P -b -w +c 0 2>&1
+out: lsof.txt
+purpose: Open files, sockets and pipes of every process.
+expect: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME table.
+empty: Never empty.
+value: Deleted-but-open files, sockets of unknown processes, files in temp folders.
+ref: UAC:lsof
+
+[D04-007] CMD kit 120
+cmd: for p in /proc/[0-9]*; do pid=${p##*/}; for fd in "$p"/fd/*; do l=$(readlink "$fd" 2>/dev/null) || continue; case "$l" in *'(deleted)'*|memfd:*|/dev/shm/*|/tmp/*|/var/tmp/*) echo "$pid $(cat "$p/comm" 2>/dev/null) ${fd##*/} $l";; esac; done; done
+out: open-deleted-or-temp-files.txt
+purpose: Files held open that are deleted, memfd-backed or in temp folders (read directly from /proc).
+expect: 'PID comm fd target' lines; often empty.
+empty: Empty is normal.
+value: Malware deleting itself after start, staged data in /dev/shm.
+ref: draft-13.5; SANS-FOR577
+
+[D04-008] FUNC kit 1800
+cmd: deleted_open_file_copies
+out: deleted-open-files
+purpose: Copy the content of deleted files still held open by a process (through /proc/<pid>/fd).
+expect: deleted-open-files/<pid>_<fd>.bin + index.tsv.
+empty: EMPTY when no deleted file is open.
+value: Recovers wiped logs and self-deleted payloads.
+sensitive: yes
+ref: draft-13.5
+
+[D04-009] CMD kit 60
+cmd: lsns -o NS,TYPE,PATH,NPROCS,PID,PPID,COMMAND,UID,USER 2>&1; echo; ls -l /run/netns /var/run/netns 2>/dev/null
+out: namespaces.txt
+purpose: All namespaces with owning process.
+expect: One line per namespace (mnt, net, pid, uts, ipc, user, cgroup, time).
+empty: Never empty.
+value: Processes hiding in their own network/mount namespace outside any container.
+ref: draft-23.4; man:lsns(8)
+
+[D04-010] CMD kit 60
+cmd: for p in /proc/[0-9]*; do printf '%s\t%s\t' "${p##*/}" "$(cat "$p/comm" 2>/dev/null)"; tr '\n' ' ' < "$p/cgroup" 2>/dev/null; echo; done
+out: cgroups-per-process.tsv
+purpose: cgroup membership of every process.
+expect: pid, name, cgroup path (systemd unit or container id).
+empty: Never empty.
+value: Processes outside any service unit; maps processes to containers.
+ref: draft-23.4
+
+[D04-011] FUNC kit 60
+cmd: kthread_check
+out: fake-kernel-threads.txt
+purpose: Find processes named like kernel threads ([kworker], [kthreadd]) that have an executable or memory map.
+expect: 'none found' or suspicious PIDs with exe and cmdline.
+empty: Never empty (writes 'none found').
+value: Common rootkit/miner disguise.
+ref: draft-23.4; SANS-FOR577
+
+[D04-012] CMD kit 30
+cmd: cat /proc/sys/kernel/pid_max; echo; ls -d /proc/[0-9]* | wc -l; echo; grep -E 'hidepid|subset' /proc/mounts || echo 'proc mounted without hidepid'
+out: proc-visibility.txt
+purpose: pid_max, number of visible processes and /proc mount options.
+expect: pid_max, process count, hidepid absent.
+empty: Never empty.
+value: hidepid hides processes from non-root; noted for completeness.
+ref: draft-37.3 no.52
+
+[D04-013] CMD kit 30
+cmd: cat /proc/locks; echo; lslocks -o COMMAND,PID,TYPE,SIZE,MODE,M,START,END,PATH 2>&1
+out: file-locks.txt
+purpose: File locks held by processes.
+expect: Lock table.
+empty: Empty is possible.
+value: Shows files in use (databases, lock files of malware).
+ref: man:lslocks(8)
+
+[D04-014] CMD kit 30
+cmd: lsipc 2>&1; echo; cat /proc/sysvipc/shm 2>/dev/null; ls -la --time-style=full-iso /dev/shm /dev/mqueue 2>&1
+out: ipc-shared-memory.txt
+purpose: SysV IPC objects, POSIX shared memory and message queues.
+expect: lsipc summary, shm segment table, /dev/shm listing.
+empty: Usually small.
+value: Malware stores payloads or config in shared memory.
+ref: UAC:ipcs
+
+[D04-015] CMD kit 60
+cmd: top -b -n 1 2>&1 | head -n 80
+out: top.txt
+purpose: CPU/memory consumers at collection time.
+expect: top header and process list.
+empty: Never empty.
+value: Cryptominers and runaway processes.
+ref: UAC:top

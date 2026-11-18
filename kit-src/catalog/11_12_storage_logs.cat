@@ -1,0 +1,246 @@
+# D11 filesystem/storage and D12 logs. Logs are copied EARLY (phase 500) so rotation caused by our own activity cannot push old entries out.
+@phase 500
+[D12-001] COPY kit 7200
+cmd: -R -x /var/log
+purpose: Complete /var/log tree (all rotations, .gz included, no size limit), excluding the C0F output folder.
+expect: auth.log/secure, syslog/messages, kern.log, cron, audit/, journal/, web/db/mail logs, etc.
+empty: A missing or almost empty /var/log is itself suspicious.
+value: Main event history of the host.
+ref: draft-5; RFC3227
+
+[D12-002] COPY kit 3600
+cmd: -R /run/log/journal /var/log/journal
+purpose: systemd journal files (persistent and volatile).
+expect: system.journal, user-*.journal per boot folder (machine-id).
+empty: /run/log/journal exists only when journald keeps logs in RAM.
+value: Raw journal can be read offline with journalctl -D, including entries the server's tools would hide.
+ref: draft-5
+
+[D12-003] FUNC server 3600
+cmd: journal_export
+out: journal
+req: has journalctl
+purpose: Text export of the journal per boot (short-iso-precise), boot list, journal verification, disk usage.
+expect: journal/boots.txt, journal/boot_<n>.txt, verify.txt.
+empty: Not applicable without journald.
+value: Human-readable events; --verify reports corrupted or edited journal files.
+ref: draft-5; draft-14.13
+
+[D12-004] COPY kit 1800
+cmd: -R /var/adm /var/run/log /run/log /var/account /var/log/account /var/log/pacct /var/spool/rsyslog
+purpose: Other log locations: /var/adm (older Unix/Linux), process accounting, rsyslog queues.
+expect: pacct files when process accounting is enabled.
+empty: Usually NOT_FOUND.
+value: Process accounting records every executed command (with lastcomm), even when history is disabled.
+ref: UAC:var_adm; draft-20.2
+
+[D12-005] CMD server 120
+cmd: for f in /var/account/pacct /var/log/account/pacct /var/log/pacct; do [ -f "$f" ] && { echo "== $f"; srv lastcomm -f "$f" 2>&1 | head -n 200000; }; done
+out: lastcomm.txt
+req: [ -f /var/account/pacct ] || [ -f /var/log/account/pacct ] || [ -f /var/log/pacct ]
+purpose: Decoded process accounting (commands executed, user, tty, time).
+expect: command flags user tty cpu time lines.
+empty: Not applicable without process accounting.
+value: Command execution history independent of shell history.
+ref: draft-20.2
+
+[D12-006] FUNC kit 1200
+cmd: logs_outside_varlog
+out: logs-outside-varlog
+purpose: Find and copy log files outside /var/log: paths named in rsyslog/syslog-ng/application configs and *.log files under /opt, /srv, /home, /root, /usr/local, /var/www, /var/lib.
+expect: Copies plus found.tsv (path, size, mtime, how found).
+empty: EMPTY when all logs are in /var/log.
+value: Application logs that standard collectors miss (advanced_log_search).
+ref: UAC:advanced_log_search; draft-20.2
+
+[D12-007] COPY kit 120
+cmd: -R /etc/rsyslog.conf /etc/rsyslog.d /etc/syslog.conf /etc/syslog-ng /etc/systemd/journald.conf /etc/systemd/journald.conf.d /etc/audit /etc/audisp /etc/logwatch /etc/logrotate.conf /etc/logrotate.d /etc/newsyslog.conf /etc/sysconfig/syslog /opt/splunkforwarder/etc/system/local /opt/splunkforwarder/etc/apps /etc/filebeat /etc/fluent /etc/fluent-bit /etc/td-agent /etc/vector /etc/promtail /var/ossec/etc/ossec.conf /etc/nxlog
+purpose: Logging configuration: where logs go (local files, remote SIEM), retention, audit rules.
+expect: Config files of the logging stack in use.
+empty: Only the stack in use.
+value: Remote log destinations (ask the SIEM for logs deleted here); disabled logging or short retention.
+ref: draft-20.2
+
+[D12-008] FUNC mixed 600
+cmd: auditd_state
+out: audit
+req: [ -d /etc/audit ] || has auditctl
+purpose: auditd status and active rules (auditctl -s/-l), plus aureport summaries (logins, executables, files, anomalies) from the copied audit logs.
+expect: audit/status.txt, rules-active.txt, aureport-*.txt.
+empty: Not applicable without auditd.
+value: Which events were recorded; summaries point to the right part of a large audit.log.
+ref: draft-14.7
+
+[D12-009] FUNC kit 300
+cmd: log_gap_check
+out: log-integrity.txt
+purpose: Detect signs of log tampering: zero-size or recently created logs, rotation files larger than the current one, time gaps in wtmp/journal, non-text bytes in text logs, logs older than 'since' with recent change time.
+expect: Findings list or 'no findings'.
+empty: Never empty.
+value: Anti-forensics (cleared or edited logs) is evidence by itself.
+ref: draft-13.5; draft-14.13
+
+[D12-010] FUNC kit 300
+cmd: auth_summary
+out: auth-summary
+purpose: Summaries from auth.log/secure/journal: accepted/failed logins per user, source IP, method and key fingerprint; sudo commands; su; new users/groups; password changes.
+expect: auth-summary/*.tsv.
+empty: EMPTY when no auth logs exist.
+value: Fast overview of who got in, from where, with which key, and what they ran with sudo.
+ref: draft-13.3; SANS-FOR577
+
+@phase 1100
+[D11-001] COPY kit 60
+cmd: /proc/mounts /proc/self/mountinfo /proc/partitions /proc/filesystems /proc/mdstat /proc/swaps /proc/diskstats /etc/fstab /etc/mtab /etc/crypttab /etc/exports /etc/exports.d /etc/auto.master /etc/auto.master.d /etc/multipath.conf /etc/mdadm.conf /etc/mdadm/mdadm.conf /etc/iscsi/initiatorname.iscsi /etc/lvm/lvm.conf
+purpose: Mount tables, partitions, RAID, encryption, export and automount configuration.
+expect: Text tables and config files.
+empty: Some features unused (NOT_FOUND).
+value: Hidden/bind mounts, noexec missing on /tmp, encrypted volumes, NFS exports.
+ref: draft-26.3
+
+[D11-002] CMD kit 60
+cmd: findmnt -A -o TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION,ID,PARENT 2>&1; echo; df -hT 2>&1; echo; df -i 2>&1
+out: mounts-usage.txt
+purpose: Mount tree with options; space and inode usage per filesystem.
+expect: findmnt tree; df tables.
+empty: Never empty.
+value: Overlay or bind mounts hiding directories; a nearly full disk (log wipe, staging).
+ref: draft-26.3
+
+[D11-003] FUNC kit 120
+cmd: mount_namespace_diff
+out: mount-namespaces.txt
+purpose: Compare mountinfo of every process with PID 1 and list processes with a different mount view (outside containers).
+expect: List of mount namespaces and the processes in them.
+empty: Never empty.
+value: Mounts that hide files from administrators (mount over a directory) appear only in some namespaces.
+ref: draft-23.4 no.5
+
+[D11-004] CMD kit 60
+cmd: blkid 2>&1; echo; fdisk -l 2>&1; echo; for d in /sys/block/*; do n=${d##*/}; case $n in loop*|ram*) continue;; esac; echo "== $n"; sfdisk -d "/dev/$n" 2>&1; done
+out: partitions.txt
+purpose: Filesystem signatures, UUIDs, labels and partition tables.
+expect: blkid lines; partition table dumps.
+empty: Containers often see no disks.
+value: Hidden partitions, unexpected filesystems, partition GUIDs for imaging.
+ref: draft-26.3; UAC:fdisk
+
+[D11-005] FUNC kit 600
+cmd: fs_params
+out: fs-params
+purpose: Per local filesystem: ext2/3/4 tune2fs -l and dumpe2fs -h (creation, last mount, last write, errors), XFS xfs_info, btrfs filesystem show/usage/subvolume list, ZFS zpool/zfs get all.
+expect: One file per filesystem.
+empty: Never empty on a disk-based host.
+value: Filesystem creation time (OS install estimate), last mount/write times, error state.
+ref: draft-26.3
+
+[D11-006] FUNC server 300
+cmd: lvm_state
+out: lvm
+req: [ -d /etc/lvm ] || has lvm || [ -d /sys/class/block/dm-0 ]
+purpose: LVM report (pvs/vgs/lvs/pvdisplay/vgdisplay/lvdisplay --readonly, lvm config), device-mapper (dmsetup ls/table/status/info), LUKS status.
+expect: lvm/*.txt.
+empty: Not applicable without LVM/device-mapper.
+value: Snapshots (pre-incident state), LVs created/removed, encrypted volumes.
+ref: draft-26.2
+
+[D11-007] COPY kit 300
+cmd: -R /etc/lvm/backup /etc/lvm/archive /etc/lvm/profile /run/lvm
+purpose: LVM metadata backups and archives.
+expect: Text metadata per VG with 'description' and 'creation_time' of each change.
+empty: Not applicable without LVM.
+value: History of LV/snapshot creation and removal, including the command that did it.
+ref: draft-26.2
+
+[D11-008] FUNC server 300
+cmd: storage_extra
+out: storage-extra
+purpose: mdadm --detail --scan, multipath -ll, iscsiadm sessions, cryptsetup status, zpool status/history, btrfs subvolumes, quota, swapon --show.
+expect: One file per tool present.
+empty: EMPTY when none of these features is used.
+value: Remote (iSCSI/NFS) storage, RAID changes, ZFS command history (zpool history).
+ref: draft-26.2; UAC:mdadm; UAC:zpool
+
+[D11-009] FUNC kit 1800
+cmd: suid_sgid_caps
+out: special-permissions
+purpose: SUID/SGID files, files with capabilities (getcap -r), world-writable folders without sticky bit, files without owner/group on local filesystems.
+expect: special-permissions/*.txt lists.
+empty: Never empty (normal SUID binaries like su, passwd).
+value: SUID shells and capability-enabled copies of bash/python are privilege-escalation backdoors.
+ref: draft-4; UAC:suid
+
+[D11-010] FUNC kit 1800
+cmd: acl_xattr_scan
+out: acl-xattr
+purpose: getfacl -R and getfattr -d -m - on /etc, /usr/bin, /usr/sbin, /bin, /sbin, /root, /home, /var/spool/cron, web roots; SELinux labels.
+expect: ACL and extended attribute dumps.
+empty: Mostly default entries.
+value: Hidden permissions granted by ACL; security.capability xattrs; tampered SELinux labels.
+ref: draft-23.4 no.2
+
+[D11-011] FUNC kit 1800
+cmd: hidden_files_scan
+out: hidden-files
+purpose: Hidden files and folders (names starting with '.', '...', spaces) in system and temp folders; executables in /tmp, /var/tmp, /dev/shm, /run.
+expect: Lists with metadata.
+empty: Some hidden files are normal (.cache, .bashrc).
+value: Staging folders ('...', '. '), dropped tools in temp folders.
+ref: UAC:hidden_files; UAC:hidden_directories
+
+[D11-012] FUNC kit 3600
+cmd: tmpfs_copy
+out: tmpfs-content
+purpose: Copy files from RAM-backed folders (/dev/shm, /run excluding big runtime data, /tmp and /var/tmp when tmpfs) - lost at reboot.
+expect: Copies with metadata.
+empty: EMPTY when these folders are empty.
+value: Payloads and data staged in memory-backed folders.
+sensitive: yes
+ref: draft-14.11
+
+[D11-013] FUNC kit 1800
+cmd: recent_changes
+out: recent-changes
+purpose: Files changed (mtime or ctime) within --since days in /etc, /usr, /bin, /sbin, /lib*, /opt, /root, /home, /var/www, /srv, /tmp, /var/tmp, /dev/shm, /boot.
+expect: recent-changes/<area>.tsv sorted by time.
+empty: Possible on frozen systems.
+value: Quick view of what changed around the incident.
+ref: draft-6
+
+[D11-014] FUNC kit 3600
+cmd: exec_hashes
+out: executable-hashes.tsv
+purpose: SHA-256 of every executable/shared library in /bin, /sbin, /usr/bin, /usr/sbin, /usr/local/*bin, /lib*/security and /usr/lib*/security.
+expect: TSV: path, size, mtime, ctime, sha256.
+empty: Never empty.
+value: Compare with known-good hash sets (NSRL, vendor packages) on the analyst workstation.
+ref: draft-6
+
+[D11-015] COPY kit 300
+cmd: /var/lib/mlocate/mlocate.db /var/lib/plocate/plocate.db /var/cache/locate/locatedb /var/lib/slocate/slocate.db
+purpose: locate databases (snapshot of all file names at the last indexing).
+expect: Binary database.
+empty: Not installed on many servers.
+value: Names of files that existed at index time but are deleted now.
+ref: draft-14.6
+
+@phase 2500
+[D11-020] FUNC kit 14400
+cmd: fs_timeline
+out: timeline
+opt: TIMELINE
+purpose: Full filesystem timeline: one row per file on every local filesystem (statx: atime, mtime, ctime, birth time, size, mode, owner, inode), plus a bodyfile for mactime/plaso.
+expect: timeline/<mount>.tsv per filesystem and timeline/bodyfile.txt.
+empty: Never empty.
+value: The Linux equivalent of parsing the NTFS $MFT for live files.
+ref: draft-6; draft-31.2
+
+[D11-021] FUNC kit 14400
+cmd: fs_metadata_images
+out: fs-metadata
+opt: E2IMAGE
+purpose: Filesystem metadata images: e2image for ext2/3/4 (all inodes, directories, journal, no file content), xfs_metadump/btrfs-image when the server has them; debugfs stats/lsdel/logdump summaries.
+expect: fs-metadata/<device>.e2i (0.1-2% of the filesystem size) and debugfs-*.txt.
+empty: SKIPPED for filesystems without a metadata imager.
+value: Offline analysis of deleted inodes (dtime) and the ext4 journal, like an exported $MFT + $LogFile.
+ref: draft-31.2

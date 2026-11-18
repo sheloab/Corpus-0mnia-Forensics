@@ -1,0 +1,145 @@
+# D18 containers and D19 Kubernetes. Everything is read from the host; nothing is executed inside containers.
+@phase 1600
+[D18-001] FUNC kit 120
+cmd: container_runtime_detect
+out: runtimes.txt
+purpose: Detect container runtimes and sockets: Docker, Podman (root and rootless per user), containerd, CRI-O, LXC/LXD/Incus, systemd-nspawn; client/daemon versions.
+expect: One line per runtime with socket, version, data folder.
+empty: 'no container runtime' on hosts without containers.
+value: Decides which of the following items apply.
+ref: draft-7
+
+[D18-002] FUNC kit 3600
+cmd: docker_collect
+out: docker
+req: [ -S /var/run/docker.sock ] || [ -S /run/docker.sock ] || [ -d /var/lib/docker ]
+purpose: Docker: version/info, containers incl. stopped (ps -a), inspect of every container/image/network/volume, logs with timestamps, diff, top, history --no-trunc of every image, events of the last --since days, compose labels -> compose files, containers.csv summary.
+expect: docker/containers.csv plus docker/<container>/{inspect.json,logs.txt,diff.txt,top.txt,network/...} and docker/images/<id>.history.txt.
+empty: Not applicable without Docker. Kit client falls back to a lower API version or the server's docker for old daemons.
+value: Container state and lifecycle, privileged/host-network/docker.sock mounts, files changed inside containers, rebuilt Dockerfile steps.
+sensitive: yes
+ref: draft-7; draft-13.4; draft-37.3 no.34
+
+[D18-003] FUNC kit 3600
+cmd: container_namespaces
+out: container-inside
+purpose: For every running container (any runtime): network inside its namespace (ip addr/route/neigh, ss, iptables/nft) via nsenter -n, and key files read through /proc/<pid>/root (passwd, shadow, crontabs, shell histories, authorized_keys, resolv.conf, hosts, hostname, os-release).
+expect: container-inside/<name>/network/*.txt and files/... copies.
+empty: EMPTY when no container runs.
+value: Backdoors and attacker activity inside containers without docker exec (no state change).
+sensitive: yes
+ref: draft-13.4; draft-7
+
+[D18-004] COPY kit 7200
+cmd: -R /var/lib/docker/containers /etc/docker /etc/containerd /etc/crio /etc/containers /var/lib/containers/storage/overlay-containers /etc/systemd/system/docker.service.d /etc/default/docker /etc/sysconfig/docker
+purpose: Raw Docker/containerd/CRI-O/Podman configuration and per-container state files (config.v2.json, hostconfig.json, *-json.log).
+expect: Per-container folders and daemon configuration.
+empty: Not applicable without these runtimes.
+value: Ground truth when the daemon is down or lies; full container logs including rotations.
+sensitive: yes
+ref: draft-7
+
+[D18-005] FUNC kit 3600
+cmd: compose_dockerfiles_search
+out: build-files
+purpose: Search the filesystem for Dockerfile*, Containerfile*, *.dockerfile, docker-compose*/compose*.y?ml, .dockerignore, podman-compose, Helm charts, kustomization and Kubernetes manifests; copy them with the .env next to compose files.
+expect: build-files/found.tsv and copies. Rows say NOT FOUND per category when nothing exists.
+empty: EMPTY when no build/deploy files exist.
+value: How containers were built and deployed; secrets in .env; attacker-modified compose files.
+sensitive: yes
+ref: draft-13.4
+
+[D18-006] FUNC mixed 3600
+cmd: podman_collect
+out: podman
+req: has podman || [ -d /var/lib/containers ] || ls -d /home/*/.local/share/containers >/dev/null 2>&1
+purpose: Podman (root through the server's podman; rootless per user from storage files): ps -a, inspect, logs, images, volumes.
+expect: podman/... per user.
+empty: Not applicable without Podman.
+value: Rootless containers are invisible to root's docker command.
+sensitive: yes
+ref: draft-28.3 no.24
+
+[D18-007] FUNC kit 1800
+cmd: containerd_cri_collect
+out: containerd-cri
+req: [ -S /run/containerd/containerd.sock ] || [ -S /var/run/crio/crio.sock ] || [ -S /run/k3s/containerd/containerd.sock ]
+purpose: containerd (ctr per namespace: containers, tasks, images, snapshots) and CRI (crictl ps -a, pods, inspect, logs, images); falls back to ctr where crictl is unavailable (armv7).
+expect: containerd-cri/<ns>/... and cri/... files.
+empty: Not applicable without containerd/CRI-O.
+value: Kubernetes node workloads and plain containerd containers.
+sensitive: yes
+ref: draft-7; draft-37.3 no.36
+
+[D18-008] FUNC server 1200
+cmd: lxc_nspawn_collect
+out: lxc-nspawn
+req: has lxc || has lxc-ls || has incus || has machinectl || [ -d /var/lib/lxc ]
+purpose: LXC/LXD/Incus (list, info --show-log, config) and systemd-nspawn machines.
+expect: Per-container info and logs.
+empty: Not applicable without these tools.
+value: System containers hosting services or hidden environments.
+ref: draft-7
+
+@phase 2460
+[D18-020] FUNC kit 28800
+cmd: container_exports
+out: exports
+opt: CEXPORT
+req: [ -S /var/run/docker.sock ] || [ -S /run/docker.sock ]
+purpose: docker export of every container (including stopped ones) as tar (read-only operation).
+expect: exports/<container>.tar per container.
+empty: Not applicable without Docker containers.
+value: Complete container filesystems for offline analysis.
+sensitive: yes
+ref: draft-16
+
+@phase 1700
+[D19-001] FUNC kit 120
+cmd: k8s_detect
+out: detect.txt
+purpose: Detect Kubernetes on this node: kubelet, k3s, RKE2, microk8s, kind/minikube, static pod manifests, kubeconfig files usable for cluster-level reads.
+expect: Flavour, versions, role (control plane/worker), kubeconfigs found.
+empty: 'not a Kubernetes node'.
+value: Decides node-level and cluster-level collection.
+ref: draft-8
+
+[D19-002] COPY kit 1800
+cmd: -R /etc/kubernetes /var/lib/kubelet/config.yaml /var/lib/kubelet/kubeadm-flags.env /var/lib/kubelet/pods /etc/cni /opt/cni/conf /var/lib/cni /etc/rancher /var/lib/rancher/k3s/server/manifests /var/lib/rancher/k3s/agent/etc /var/lib/rancher/rke2/agent/etc /var/snap/microk8s/current/args /var/snap/microk8s/current/certs/csr.conf.template
+purpose: Node configuration: static pod manifests, kubelet config, CNI, k3s/RKE2/microk8s config (credentials included: sensitive).
+expect: Manifests and config files.
+empty: Not applicable on non-Kubernetes hosts.
+value: Static pods are a classic persistence; kubelet and admin credentials.
+sensitive: yes
+ref: draft-8
+
+[D19-003] COPY kit 7200
+cmd: -R /var/log/pods /var/log/containers /var/log/kubernetes /var/log/kube-apiserver /var/lib/rancher/k3s/server/logs
+purpose: Pod and container logs on this node, API server audit logs when present.
+expect: /var/log/pods/<ns>_<pod>_<uid>/<container>/N.log(.gz).
+empty: Not applicable on non-Kubernetes hosts.
+value: Logs of all workloads on the node incl. restarted containers; API audit trail.
+sensitive: yes
+ref: draft-8
+
+[D19-004] FUNC mixed 600
+cmd: k8s_node_services
+out: node-services
+req: is_k8s_node
+purpose: kubelet, container runtime and k3s/rke2 service logs from the journal; kube-proxy rules (iptables/ipvs).
+expect: Journal exports and rule dumps.
+empty: Not applicable on non-Kubernetes hosts.
+value: Node-level actions (pulls, pod starts, failures).
+ref: draft-8
+
+[D19-005] FUNC kit 7200
+cmd: k8s_cluster_collect
+out: cluster
+req: k8s_kubeconfig_available
+purpose: Cluster-level read-only collection with a local admin kubeconfig (or --kubeconfig): get all/events -A -o yaml, nodes, namespaces, RBAC, service accounts, webhooks, CRDs, secrets (content), configmaps, pod logs incl. --previous.
+expect: cluster/<resource>.yaml and cluster/logs/<ns>/<pod>/<container>.log.
+empty: Not applicable without a usable kubeconfig.
+value: Malicious workloads, RBAC changes, admission webhooks (cluster persistence), secrets accessed by an attacker.
+changes: Read requests are recorded in the API server audit log.
+sensitive: yes
+ref: draft-8; draft-16

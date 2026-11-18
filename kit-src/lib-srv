@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT OR GPL-2.0-or-later
+# Copyright (c) 2026 Corpus-0mnia Forensics (C0F) authors
+# srv NAME [ARGS...] : run a program of the EXAMINED SERVER (never one from the kit), e.g. from find -exec or xargs.
+# Every use is logged per item and reported as UNTRUSTED_TOOL in tools-used.csv.
+LIB=${LIB:-${0%/*}}
+. "$LIB/c0f-lib.sh"
+srv "$@"

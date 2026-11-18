@@ -1,0 +1,156 @@
+# D08 persistence mechanisms
+@phase 700
+[D08-001] COPY kit 120
+cmd: -R /etc/crontab /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly /etc/cron.yearly /etc/anacrontab /etc/cron.allow /etc/cron.deny /etc/at.allow /etc/at.deny /var/spool/cron /var/spool/anacron /var/spool/at /var/spool/atjobs /var/spool/cron/atjobs /var/spool/cron/atspool /etc/fcron.conf /var/spool/fcron
+purpose: All cron and at schedules, system and per user.
+expect: crontab files, per-user crontabs in /var/spool/cron(/crontabs), at job files.
+empty: Some locations do not exist on every distro.
+value: Scheduled reverse shells, miners, re-infection jobs; at jobs are often forgotten.
+ref: draft-4; UAC:cron
+
+[D08-002] CMD server 30
+cmd: srv atq 2>&1; for j in $(srv atq 2>/dev/null | awk '{print $1}'); do echo "== at job $j"; srv at -c "$j" 2>&1 | tail -n 40; done
+out: at-queue.txt
+req: has atq
+purpose: Pending at jobs with their command (end of each job script).
+expect: Queue list, often empty.
+empty: Empty queue is normal.
+value: One-shot delayed actions planted by an attacker.
+ref: draft-3
+
+[D08-003] CMD server 60
+cmd: srv systemctl list-timers --all --no-pager 2>&1
+out: systemd-timers.txt
+req: is_systemd
+purpose: All systemd timers with next/last run and the unit they trigger.
+expect: NEXT LEFT LAST PASSED UNIT ACTIVATES table.
+empty: Not applicable without systemd.
+value: Timers are the systemd equivalent of cron (persistence).
+ref: draft-3
+
+[D08-004] COPY kit 300
+cmd: -R /etc/systemd /run/systemd/system /run/systemd/transient /run/systemd/generator /run/systemd/generator.early /run/systemd/generator.late /usr/lib/systemd/system /lib/systemd/system /usr/lib/systemd/user /usr/lib/systemd/system-generators /lib/systemd/system-generators /etc/systemd/system-generators /usr/local/lib/systemd /usr/lib/systemd/system-preset /etc/systemd/user
+purpose: Every systemd unit, drop-in, generator and preset (system and user).
+expect: *.service/*.timer/*.socket/*.path files and *.d drop-ins, symlinks in *.wants (recorded as links).
+empty: Not applicable without systemd.
+value: Malicious units, drop-in overrides adding ExecStartPre, transient units created with systemd-run, generators.
+ref: draft-4; draft-23.4 no.7
+
+[D08-005] FUNC kit 300
+cmd: user_systemd_units
+out: user-units
+purpose: Per-user systemd units (~/.config/systemd/user) and lingering users.
+expect: user-units/<user>/... copies.
+empty: EMPTY when no user units exist.
+value: User-level persistence that survives logout when linger is enabled.
+ref: draft-4
+
+[D08-006] COPY kit 120
+cmd: -R /etc/init.d /etc/rc.d /etc/rc0.d /etc/rc1.d /etc/rc2.d /etc/rc3.d /etc/rc4.d /etc/rc5.d /etc/rc6.d /etc/rcS.d /etc/rc.local /etc/rc.d/rc.local /etc/local.d /etc/init /etc/inittab /etc/runlevels /etc/conf.d /etc/sv /etc/runit /etc/service /var/service /etc/s6 /etc/supervisor /etc/supervisord.conf /etc/supervisord.d /etc/monit /etc/monitrc
+purpose: SysV, OpenRC, Upstart, runit, s6, supervisord and monit start-up scripts.
+expect: Init scripts and run-level links (recorded as links).
+empty: Only the init system in use exists.
+value: rc.local and init scripts are classic persistence on older/non-systemd systems.
+ref: draft-4
+
+[D08-007] COPY kit 120
+cmd: -R /etc/profile /etc/profile.d /etc/bash.bashrc /etc/bashrc /etc/bash_completion.d /etc/environment /etc/zsh /etc/zshrc /etc/zprofile /etc/zshenv /etc/zlogin /etc/csh.cshrc /etc/csh.login /etc/fish /etc/inputrc /etc/X11/Xsession /etc/X11/Xsession.d /etc/X11/xinit /etc/xdg/autostart /etc/update-motd.d /etc/motd.d
+purpose: System-wide shell start-up files, environment, X session scripts, autostart and MOTD scripts.
+expect: Shell rc/profile files.
+empty: Some do not exist (NOT_FOUND).
+value: Aliases/functions hijacking commands, PROMPT_COMMAND loggers, MOTD scripts run as root at every login.
+ref: draft-4; draft-14.10
+
+[D08-008] FUNC kit 300
+cmd: user_dotfiles
+out: user-dotfiles
+purpose: Copy every hidden file in the top level of each home folder and the usual config folders (.config/autostart, .local/bin, .bashrc.d).
+expect: user-dotfiles/<user>/... copies.
+empty: EMPTY when homes are empty.
+value: Per-user persistence (.bashrc, .profile, autostart), aliases, PATH hijacking.
+sensitive: yes
+ref: draft-20.2; UAC:dotfiles
+
+[D08-009] COPY kit 60
+cmd: /etc/ld.so.preload /etc/ld.so.conf /etc/ld.so.conf.d /etc/ld.so.cache
+purpose: Dynamic loader preload and search path configuration.
+expect: ld.so.preload normally absent; ld.so.conf includes ld.so.conf.d.
+empty: Missing ld.so.preload is normal.
+value: ld.so.preload is the most common userland rootkit hook (libprocesshider, Azazel, Jynx).
+ref: UAC:hidden_etc_ld_so_preload; SANS-FOR577
+
+[D08-010] FUNC kit 60
+cmd: ld_preload_check
+out: ld-preload-check.txt
+purpose: Read /etc/ld.so.preload several ways (stat, direct read, listing) and scan process environments for LD_PRELOAD/LD_LIBRARY_PATH.
+expect: 'not present' or file content plus processes with preload variables.
+empty: Never empty.
+value: Rootkits hide ld.so.preload from readdir/stat; differences between methods reveal them.
+ref: UAC:hidden_etc_ld_so_preload
+
+[D08-011] COPY kit 120
+cmd: -R /etc/modules /etc/modules-load.d /usr/lib/modules-load.d /lib/modules-load.d /etc/modprobe.d /usr/lib/modprobe.d /lib/modprobe.d /etc/modprobe.conf
+purpose: Kernel modules loaded at boot and module options/aliases.
+expect: Module names and install/blacklist rules.
+empty: Some folders absent.
+value: Rootkit modules loaded at boot; 'install' lines running commands.
+ref: draft-4
+
+[D08-012] COPY kit 120
+cmd: -R /etc/udev/rules.d /usr/lib/udev/rules.d /lib/udev/rules.d /run/udev/rules.d /etc/udev/udev.conf
+purpose: udev rules.
+expect: *.rules files.
+empty: Not applicable without udev.
+value: RUN+= rules execute programs on device events (persistence).
+ref: draft-4
+
+[D08-013] COPY kit 120
+cmd: -R /etc/logrotate.conf /etc/logrotate.d /etc/apt/apt.conf.d /etc/yum/pluginconf.d /etc/dnf/plugins /usr/lib/yum-plugins /usr/lib/python3*/site-packages/dnf-plugins /etc/NetworkManager/dispatcher.d /etc/network/if-up.d /etc/network/if-down.d /etc/network/if-pre-up.d /etc/network/if-post-down.d /etc/ppp/ip-up.d /etc/dhcp/dhclient-exit-hooks.d /etc/dhcp/dhclient-enter-hooks.d /etc/needrestart /etc/kernel/postinst.d /etc/initramfs-tools/hooks /etc/dracut.conf /etc/dracut.conf.d /usr/lib/dracut/modules.d
+purpose: Hooks executed by other programs: logrotate postrotate, apt/dnf hooks and plugins, network dispatcher scripts, kernel/initramfs hooks.
+expect: Configuration and hook scripts.
+empty: Only components present on this distro.
+value: Less known persistence: code runs whenever logs rotate, packages install or networks come up.
+ref: draft-14.10; UAC:dracut
+
+[D08-014] COPY kit 120
+cmd: -R /etc/dbus-1 /usr/share/dbus-1/system-services /usr/share/dbus-1/system.d /etc/xdg /usr/share/gnome-shell/extensions
+purpose: D-Bus services/policies and desktop autostart folders.
+expect: Service and policy files.
+empty: Minimal servers may lack D-Bus.
+value: D-Bus activated services can start code as root.
+ref: draft-14.10
+
+[D08-015] COPY kit 120
+cmd: -R /etc/default/grub /etc/default/grub.d /boot/grub/grub.cfg /boot/grub2/grub.cfg /boot/efi/EFI /boot/loader /etc/grub.d /etc/kernel/cmdline /etc/sysconfig/kernel
+purpose: Boot loader configuration.
+expect: grub config/cmdline files.
+empty: Containers have none.
+value: init= or module options injected at boot; unexpected EFI binaries.
+ref: draft-14.10
+
+[D08-016] CMD kit 30
+cmd: for f in /proc/sys/fs/binfmt_misc/*; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done
+out: binfmt-misc.txt
+purpose: Registered binfmt_misc handlers.
+expect: 'register' and 'status' plus handlers such as qemu or WSL interop.
+empty: Not mounted on some systems.
+value: A custom interpreter registered for a magic/extension runs attacker code (persistence).
+ref: UAC:binfmt_misc
+
+[D08-017] FUNC kit 600
+cmd: immutable_attr_scan
+out: immutable-append-only.txt
+purpose: lsattr scan of system and persistence folders for immutable (i) or append-only (a) files.
+expect: List of files with i/a attribute; usually empty.
+empty: Empty is normal.
+value: Attackers set +i on their backdoors so admins cannot delete them.
+ref: draft-23.4 no.1
+
+[D08-018] FUNC kit 600
+cmd: git_hooks_scan
+out: git-hooks
+purpose: Find git repositories under web roots, /opt, /srv, /home, /root and copy their hooks and config (+ git status/reflog files).
+expect: git-hooks/<repo path>/... and repos.txt.
+empty: EMPTY when no repositories exist.
+value: Hooks run code on git operations; reflog shows code changes on servers deployed by git.
+ref: draft-14.10; draft-20.2

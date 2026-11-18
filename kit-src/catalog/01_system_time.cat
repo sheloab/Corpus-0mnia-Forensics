@@ -1,0 +1,237 @@
+# D01 system identity + D02 time. Taken first: every later timestamp is interpreted with these.
+@phase 100
+[D02-001] CMD kit 10
+cmd: printf 'utc=%s\nlocal=%s\nepoch_ns=%s\ntz_env=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "$(date '+%Y-%m-%dT%H:%M:%S.%N %z %Z')" "$(date +%s%N)" "${TZ:-unset}"
+out: clock-now.txt
+purpose: Server clock at collection start in UTC and local time, with nanoseconds.
+expect: Four lines: utc=, local= with offset and zone name, epoch_ns=, tz_env=.
+empty: Never empty; empty means the kit date tool failed.
+value: Reference point to compare with the examiner's trusted clock (offset of the server clock).
+ref: RFC3227; NIST800-86; draft-18
+
+[D02-002] CMD kit 10
+cmd: cat /proc/uptime; echo; cat /proc/loadavg; echo; uptime
+out: uptime.txt
+purpose: Seconds since boot and load average.
+expect: /proc/uptime (two numbers), /proc/loadavg, uptime summary line.
+empty: Never empty on Linux.
+value: Boot time = collection time minus uptime; recent reboot can hide volatile evidence.
+ref: RFC3227; man:proc(5)
+
+[D02-003] CMD kit 10
+cmd: for f in /etc/timezone /etc/sysconfig/clock /etc/adjtime /etc/default/rcS; do [ -f "$f" ] && { echo "== $f"; cat "$f"; }; done; echo "== /etc/localtime -> $(readlink /etc/localtime 2>/dev/null || echo 'not a symlink')"; sha256sum /etc/localtime 2>/dev/null
+out: timezone-files.txt
+purpose: System time zone from every place a distro may store it.
+expect: Zone name (e.g. Europe/Berlin), localtime link target and its hash, RTC mode in /etc/adjtime (UTC or LOCAL).
+empty: All missing means the system runs in UTC by default.
+value: Needed to convert syslog/application times that carry no zone.
+ref: draft-18; man:localtime(5)
+
+[D02-004] FUNC kit 30
+cmd: tz_identify
+out: timezone-identify.txt
+purpose: Identify the zone of /etc/localtime when it is a copied file (compare with /usr/share/zoneinfo).
+expect: Matching zone names, or 'no match'.
+empty: Empty when /etc/localtime is missing.
+value: A localtime file that matches no zone can indicate tampering with time settings.
+ref: draft-18
+
+[D02-005] CMD server 20
+cmd: srv timedatectl status; echo; srv timedatectl show; echo; srv timedatectl timesync-status 2>&1
+out: timedatectl.txt
+req: is_systemd
+purpose: systemd view of local time, UTC, RTC, zone, NTP state.
+expect: Local/Universal/RTC time, Time zone, System clock synchronized, NTP service active.
+empty: Not applicable without systemd.
+value: Shows whether NTP was active and whether the RTC is in local time (common timeline error).
+ref: man:timedatectl(1)
+
+[D02-006] CMD kit 15
+cmd: hwclock --show --verbose 2>&1; echo; for f in /sys/class/rtc/rtc0/date /sys/class/rtc/rtc0/time /sys/class/rtc/rtc0/since_epoch /sys/class/rtc/rtc0/hctosys; do [ -r "$f" ] && echo "$f=$(cat "$f")"; done
+out: rtc.txt
+purpose: Hardware clock (RTC) value read directly.
+expect: RTC date/time and since_epoch; hwclock verbose output.
+empty: Virtual machines may have no RTC device.
+value: Large RTC/system difference shows clock manipulation or bad hardware time.
+ref: man:hwclock(8)
+
+[D02-007] CMD server 20
+cmd: { echo "== chronyc tracking"; srv chronyc -n tracking; echo "== chronyc sources"; srv chronyc -n sources -v; } 2>&1
+out: chrony.txt
+req: has chronyc
+purpose: NTP synchronisation state and sources (chrony).
+expect: Reference ID, stratum, system time offset, list of sources.
+empty: Not applicable when chrony is not installed.
+value: Offset and NTP sources used; an attacker-controlled NTP server shifts all timestamps.
+ref: man:chronyc(1)
+
+[D02-008] CMD server 20
+cmd: { srv ntpq -pn; srv ntpstat; } 2>&1
+out: ntpq.txt
+req: has ntpq || has ntpstat
+purpose: NTP peers and synchronisation (ntpd).
+expect: Peer table with offset/jitter.
+empty: Not applicable when ntpd is not installed.
+value: Same as chrony: clock source and offset.
+ref: man:ntpq(1)
+
+[D02-009] COPY kit 30
+cmd: /etc/chrony.conf /etc/chrony /etc/ntp.conf /etc/ntpsec /etc/systemd/timesyncd.conf /etc/systemd/timesyncd.conf.d /var/lib/chrony/drift /var/lib/ntp/ntp.drift /var/lib/systemd/timesync/clock /etc/openntpd/ntpd.conf
+purpose: NTP client configuration and drift files.
+expect: Config files listing time servers; drift values.
+empty: NOT_FOUND for clients that are not installed.
+value: Unexpected NTP servers; mtime of timesync/clock shows the last successful sync.
+ref: draft-18; UAC:ntp
+
+[D02-010] FUNC mixed 900
+cmd: time_change_evidence
+out: time-change-evidence.txt
+purpose: Search logs and shell histories for clock/zone changes (date -s, timedatectl set-time, hwclock --set, 'Time has been changed').
+expect: Matching lines with file name, or 'no matches'.
+empty: Empty means no recorded clock change.
+value: Deliberate clock changes are an anti-forensics technique.
+ref: draft-18; SANS-FOR577
+
+[D02-011] CMD server 30
+cmd: srv dpkg-query -W -f '${Package} ${Version}\n' tzdata 2>/dev/null || srv rpm -q tzdata 2>/dev/null || srv apk info -v tzdata 2>/dev/null; head -n 1 /usr/share/zoneinfo/tzdata.zi 2>/dev/null
+out: tzdata-version.txt
+purpose: Version of the time zone database.
+expect: tzdata package version and/or '# version 2026a' line.
+empty: Empty when no package manager and no tzdata.zi.
+value: Old tzdata gives wrong offsets for recent zone rule changes.
+ref: draft-18
+
+[D01-001] CMD kit 10
+cmd: uname -a; echo; for f in /proc/version /proc/cmdline /proc/sys/kernel/osrelease /proc/sys/kernel/version /proc/sys/kernel/hostname /proc/sys/kernel/domainname /proc/sys/kernel/random/boot_id; do echo "$f: $(cat "$f" 2>/dev/null)"; done
+out: kernel-identity.txt
+purpose: Kernel version, build, boot parameters, hostname, boot id.
+expect: uname line and the listed /proc values.
+empty: Never empty.
+value: Kernel version for exploit relevance; cmdline shows boot options (init=, module blacklists); boot_id ties journal entries to this boot.
+ref: RFC3227; UAC:uname
+
+[D01-002] COPY kit 30
+cmd: /etc/os-release /usr/lib/os-release /etc/lsb-release /etc/debian_version /etc/redhat-release /etc/centos-release /etc/rocky-release /etc/almalinux-release /etc/oracle-release /etc/fedora-release /etc/system-release /etc/system-release-cpe /etc/SuSE-release /etc/alpine-release /etc/arch-release /etc/gentoo-release /etc/slackware-version /etc/issue /etc/issue.net /etc/machine-id /var/lib/dbus/machine-id /etc/hostname /etc/hostid /etc/motd
+purpose: Distribution release files and machine identity files.
+expect: os-release with NAME/VERSION_ID; release strings; machine-id (32 hex chars).
+empty: Files that do not exist on this distribution are NOT_FOUND (normal).
+value: Exact OS release; machine-id identifies the installation across reimages of the same disk.
+ref: draft-26.5; UAC:os_release
+
+[D01-003] FUNC kit 20
+cmd: os_profile_report
+out: os-profile.txt
+purpose: Which OS profile C0F selected, what the profile expects on this OS and what is missing.
+expect: Detected ID/version/family, profile name, package manager, init, expected commands with present/MISSING.
+empty: Never empty.
+value: EXPECTED_BUT_MISSING commands/files can mean a minimal install or removed/replaced tools (tampering).
+ref: os-profile.tsv; draft-v0.27
+
+[D01-004] CMD server 15
+cmd: srv hostnamectl 2>&1; srv lsb_release -a 2>&1
+out: hostnamectl.txt
+req: has hostnamectl || has lsb_release
+purpose: Static/transient hostname, chassis, virtualization and OS as reported by the system tools.
+expect: Static hostname, Machine ID, Boot ID, Virtualization, Operating System, Kernel.
+empty: Not applicable without systemd/lsb tools.
+value: Cross-check of identity values from files.
+ref: man:hostnamectl(1)
+
+[D01-005] FUNC kit 30
+cmd: virt_detect
+out: virtualization.txt
+purpose: Detect virtualization, container and cloud environment without calling any network service.
+expect: Hypervisor flags from cpuinfo, DMI vendor/product, /proc/1/cgroup, container markers, cloud markers.
+empty: Never empty.
+value: Tells whether this host is a VM, a container or bare metal, and which cloud (needed to request provider logs).
+ref: draft-2; UAC:virtualization
+
+[D01-006] CMD kit 30
+cmd: dmidecode 2>&1
+out: hardware/dmidecode.txt
+purpose: Full DMI/SMBIOS table (system, board, BIOS, chassis, memory).
+expect: Handles with System Information (manufacturer, product, serial, UUID), BIOS version/date.
+empty: Empty on systems without DMI (many ARM boards).
+value: Serial numbers and UUID identify the physical/virtual machine for the chain of custody.
+ref: man:dmidecode(8); UAC:dmidecode
+
+[D01-007] CMD kit 20
+cmd: for f in /sys/class/dmi/id/*; do [ -f "$f" ] && [ -r "$f" ] && printf '%s=%s\n' "${f##*/}" "$(cat "$f" 2>/dev/null)"; done
+out: hardware/dmi-sysfs.txt
+purpose: DMI values exposed by the kernel in sysfs.
+expect: product_name, product_uuid, sys_vendor, board_serial, bios_date, ...
+empty: Empty without DMI (ARM, some containers).
+value: Same identity values as dmidecode, read without SMBIOS parsing.
+ref: draft-2
+
+[D01-008] CMD kit 20
+cmd: cat /proc/cpuinfo; echo; cat /proc/meminfo; echo; cat /proc/iomem 2>/dev/null | head -n 200
+out: hardware/cpu-memory.txt
+purpose: CPU model/flags, memory statistics.
+expect: processor blocks with model name and flags; MemTotal etc.
+empty: Never empty.
+value: Hypervisor flag, RAM size (to size the memory dump), memory pressure.
+ref: UAC:cpuinfo; UAC:free
+
+[D01-009] CMD kit 20
+cmd: free -w; echo; vmstat 1 3; echo; cat /proc/swaps; echo; cat /proc/pressure/memory 2>/dev/null
+out: hardware/memory-usage.txt
+purpose: Memory and swap usage, short vmstat sample.
+expect: free table, three vmstat lines, swap devices.
+empty: Never empty.
+value: Unusual memory use (cryptominer, memory-resident malware).
+ref: UAC:free; UAC:vmstat
+
+[D01-010] CMD kit 30
+cmd: echo '== lspci (IDs only, no name database)'; lspci -mk 2>&1; echo; echo '== lsusb'; lsusb 2>&1; echo; for d in /sys/bus/usb/devices/*; do [ -f "$d/idVendor" ] && echo "$d vendor=$(cat "$d/idVendor") product=$(cat "$d/idProduct" 2>/dev/null) manufacturer=$(cat "$d/manufacturer" 2>/dev/null) name=$(cat "$d/product" 2>/dev/null) serial=$(cat "$d/serial" 2>/dev/null)"; done
+out: hardware/pci-usb.txt
+purpose: PCI and USB devices currently attached.
+expect: PCI slot/class/vendor:device IDs; USB vendor/product/serial.
+empty: Containers may see no devices.
+value: Unknown USB storage or network adapters (exfiltration, rogue devices).
+ref: UAC:lspci; UAC:lsusb
+
+[D01-011] CMD kit 30
+cmd: lsblk -a -o NAME,KNAME,MAJ:MIN,TYPE,SIZE,RO,RM,HOTPLUG,TRAN,VENDOR,MODEL,SERIAL,WWN,FSTYPE,LABEL,UUID,MOUNTPOINTS 2>&1
+out: hardware/disks.txt
+purpose: Block devices with model, serial, transport, filesystem and mount points.
+expect: One line per disk/partition/LV.
+empty: Never empty on a normal host.
+value: Disk serials for the custody form; removable/USB disks attached now.
+ref: man:lsblk(8)
+
+[D01-012] CMD kit 20
+cmd: for d in /sys/class/net/*; do n=${d##*/}; echo "$n mac=$(cat "$d/address" 2>/dev/null) perm=$(cat "$d/addr_assign_type" 2>/dev/null) operstate=$(cat "$d/operstate" 2>/dev/null) driver=$(basename "$(readlink "$d/device/driver" 2>/dev/null)" 2>/dev/null)"; done
+out: hardware/nic-identity.txt
+purpose: Network interface MAC addresses and drivers.
+expect: One line per interface with MAC and driver.
+empty: Never empty (at least lo).
+value: MAC addresses identify the host in DHCP/switch logs.
+ref: draft-14.4
+
+[D01-013] CMD kit 20
+cmd: ls -la --time-style=full-iso /boot 2>&1; echo; sha256sum /boot/* 2>/dev/null; echo; ls -la --time-style=full-iso /lib/modules /usr/lib/modules 2>/dev/null
+out: kernels-installed.txt
+purpose: Installed kernels and initramfs files with hashes; module trees.
+expect: vmlinuz-*/initrd* files with sizes, times and SHA-256.
+empty: /boot may be empty in containers.
+value: Running kernel vs newest installed (pending reboot); modified initramfs is a persistence technique.
+ref: UAC:boot; draft-26.5
+
+[D01-014] FUNC kit 60
+cmd: os_install_time
+out: os-install-time.txt
+purpose: Estimate when the OS was installed (root filesystem creation time, installer logs, oldest package).
+expect: Several candidate timestamps with their source.
+empty: Never empty (at least root inode times).
+value: Baseline for 'new' files and accounts.
+ref: draft-26.5
+
+[D01-015] CMD kit 10
+cmd: id; echo "SUDO_USER=${SUDO_USER:-} SUDO_UID=${SUDO_UID:-}"; cat /proc/self/status | grep -E '^(Cap|Uid|Gid|NoNewPrivs|Seccomp)'; cat /proc/self/cgroup; readlink /proc/self/ns/mnt /proc/1/ns/mnt
+out: collector-context.txt
+purpose: Identity, capabilities and namespaces of the collector itself.
+expect: uid=0, full capability set, same mount namespace as PID 1 when run on the host.
+empty: Never empty.
+value: Proves the collection ran with full privileges in the host namespaces (or explains gaps).
+ref: draft-14.14

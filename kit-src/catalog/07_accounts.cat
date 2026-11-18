@@ -1,0 +1,181 @@
+# D07 accounts, authentication, sessions, login history, SSH
+@phase 450
+[D07-001] FUNC kit 60
+cmd: sessions_now
+out: sessions
+purpose: Who is logged in right now: utmp parsed by c0f-logins, logind sessions, SSH/xrdp/VNC sessions, TTYs of running shells.
+expect: sessions/utmp.tsv, loginctl lists, sshd session processes, shells with their TTY.
+empty: Possible on a host nobody is logged into (except the examiner).
+value: Attacker sessions still open; shells whose history is not yet written to disk.
+ref: draft-13.3; RFC3227
+
+[D07-002] CMD server 30
+cmd: srv who -a 2>&1; echo; srv w 2>&1; echo; srv last -F -w -x 2>&1 | head -n 5000; echo; srv lastb -F -w 2>&1 | head -n 5000
+out: server-who-w-last.txt
+purpose: The server's own who/w/last/lastb output (glibc), as a cross-check of the C0F parser.
+expect: Same sessions and logins as D07-010/011.
+empty: These programs may be absent (Debian 13 dropped last; minimal installs).
+value: A difference with c0f-logins output can reveal tampered server binaries.
+ref: draft-40.3; UAC:last
+
+@phase 600
+[D07-010] FUNC kit 300
+cmd: logins_parse
+out: logins
+purpose: Parse wtmp/btmp/utmp (all rotations, also .gz), lastlog and faillog with c0f-logins (glibc layout, libc-independent).
+expect: logins/wtmp*.tsv, btmp*.tsv, utmp.tsv, lastlog.tsv, faillog.tsv with an anomaly column.
+empty: Files missing on systems that use wtmpdb/lastlog2 instead.
+value: Login history incl. source IP; ALL_ZERO_RECORD/TIME_BACKWARDS anomalies show log wiping.
+ref: draft-13.3; draft-40.3; SANS-FOR577
+
+[D07-011] COPY kit 300
+cmd: /var/run/utmp /run/utmp /var/log/wtmp* /var/log/btmp* /var/log/lastlog /var/log/faillog /var/lib/wtmpdb /var/lib/lastlog /var/log/tallylog /var/run/faillock /run/faillock
+purpose: Raw binary login records (utmp/wtmp/btmp, lastlog, faillog, wtmpdb, lastlog2, faillock).
+expect: Binary files; lastlog may be sparse and look huge (copied sparse).
+empty: Newer distros keep only wtmpdb/lastlog2 (Debian 13).
+value: Original evidence for offline parsing with other tools.
+ref: draft-13.3; UAC:wtmp
+
+[D07-012] CMD kit 60
+cmd: for db in /var/lib/wtmpdb/wtmp.db; do [ -f "$db" ] && { cp "$db" "$C0F_TMP/wtmpdb.copy" && sqlite3 -readonly -header -separator "$(printf '\t')" "$C0F_TMP/wtmpdb.copy" "SELECT ID,Type,User,datetime(Login/1000000,'unixepoch') AS login_utc,datetime(Logout/1000000,'unixepoch') AS logout_utc,TTY,RemoteHost,Service FROM wtmp ORDER BY Login;"; rm -f "$C0F_TMP/wtmpdb.copy"; }; done
+out: logins/wtmpdb.tsv
+req: [ -f /var/lib/wtmpdb/wtmp.db ]
+purpose: Login history from wtmpdb (replacement of wtmp on newer distros), read from a copy.
+expect: One row per login/logout/boot with user, TTY, remote host, times in UTC.
+empty: Empty database = no logins recorded.
+value: Same as wtmp for Debian 13+/openSUSE.
+ref: draft-13.3
+
+[D07-013] CMD kit 60
+cmd: lastlog2 -d /var/lib/lastlog/lastlog2.db 2>&1
+out: logins/lastlog2.txt
+req: [ -f /var/lib/lastlog/lastlog2.db ]
+purpose: Last login per user from the lastlog2 database.
+expect: Username, Port, From, Latest.
+empty: Empty database = nobody logged in.
+value: Last login time and source per account.
+ref: draft-13.3
+
+[D07-014] CMD server 30
+cmd: srv loginctl list-sessions --no-pager 2>&1; srv loginctl list-users --no-pager 2>&1; for s in $(srv loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do srv loginctl show-session "$s" 2>&1; echo; done; ls -la /var/lib/systemd/linger 2>/dev/null
+out: loginctl.txt
+req: has loginctl
+purpose: systemd-logind sessions and users, including lingering users.
+expect: Session list with user, seat, TTY, remote host, type (tty/x11/wayland).
+empty: Not applicable without systemd.
+value: Remote sessions and lingering users (user services run without login = persistence).
+ref: draft-23.4 no.7
+
+[D07-020] COPY kit 60
+cmd: /etc/passwd /etc/passwd- /etc/shadow /etc/shadow- /etc/group /etc/group- /etc/gshadow /etc/gshadow- /etc/subuid /etc/subgid /etc/sudoers /etc/sudoers.d /etc/doas.conf /etc/login.defs /etc/default/useradd /etc/adduser.conf /etc/shells /etc/sudo.conf /etc/sudo_logsrvd.conf
+purpose: Account, password-hash, group and privilege files (with their backup copies -).
+expect: Text files; shadow holds password hashes.
+empty: Missing passwd/shadow/group is abnormal.
+value: New/UID-0 accounts, empty passwords, sudo rules; the '-' backups show the previous state.
+sensitive: yes
+ref: draft-13.7; UAC:passwd
+
+[D07-021] DERIVED kit 120
+cmd: users_table
+out: accounts
+purpose: Build accounts/users.csv, groups.csv and findings.txt from passwd/shadow/group/sudoers, login records and home folders.
+expect: One row per account: type, password status, hash algorithm, ageing, expiry, groups, sudo rights, last login, SSH keys count, home info.
+empty: Never empty.
+value: One table answering 'which accounts exist, which can log in, which are admins, which are new or expired'.
+sensitive: yes
+ref: draft-26.4
+
+[D07-022] CMD kit 60
+cmd: lslogins -a -o USER,UID,GECOS,HOMEDIR,SHELL,NOLOGIN,PWD-LOCK,PWD-EMPTY,PWD-DENY,PWD-METHOD,GROUP,GID,SUPP-GROUPS,PWD-WARN,PWD-CHANGE,PWD-MIN,PWD-MAX,PWD-EXPIR 2>&1
+out: accounts/lslogins.txt
+purpose: Second view of accounts with password state from util-linux lslogins (kit).
+expect: One row per account.
+empty: Never empty.
+value: Cross-check of users.csv (login times are intentionally not used: see draft 40.3).
+sensitive: yes
+ref: man:lslogins(1)
+
+[D07-023] CMD server 30
+cmd: srv getent passwd 2>&1; echo '####'; srv getent group 2>&1
+out: accounts/getent-nss.txt
+req: has getent && grep -qE '^(passwd|group):.*(sss|ldap|winbind|nis)' /etc/nsswitch.conf
+purpose: Accounts from network directories (LDAP/SSSD/AD/NIS) through the server's NSS (static kit tools cannot load NSS modules).
+expect: Local plus directory accounts.
+empty: Not applicable when only local files are used.
+value: Directory accounts able to log in to this host.
+ref: draft-33.2
+
+[D07-024] COPY kit 120
+cmd: -R /etc/pam.d /etc/pam.conf /etc/security /etc/sssd /etc/krb5.conf /etc/krb5.conf.d /etc/krb5.keytab /etc/ldap /etc/openldap /etc/nslcd.conf /etc/samba/smb.conf /var/lib/sss/db /etc/polkit-1 /usr/share/polkit-1/rules.d
+purpose: PAM stack, directory/Kerberos configuration, polkit rules.
+expect: PAM service files, sssd.conf, krb5 config, polkit rules.
+empty: Some components absent (NOT_FOUND).
+value: Backdoored PAM (pam_exec, custom .so), permissive polkit rules.
+sensitive: yes
+ref: draft-14.10; UAC:pam
+
+[D07-025] FUNC kit 120
+cmd: pam_modules_check
+out: pam-modules.txt
+purpose: List every PAM module referenced, with path, hash, owning package path and timestamps; flag modules outside standard folders.
+expect: One line per module; 'unusual' flags.
+empty: Never empty on a normal host.
+value: A rogue pam_*.so is a classic credential-stealing backdoor.
+ref: SANS-FOR577; draft-14.10
+
+[D07-030] COPY kit 120
+cmd: -R /etc/ssh /etc/ssh/sshd_config.d /etc/ssh/ssh_config.d /root/.ssh /etc/ssh/ssh_known_hosts /etc/ssh/moduli
+purpose: SSH server/client configuration and root's SSH folder (host private keys included: sensitive).
+expect: sshd_config, host keys, root authorized_keys/known_hosts.
+empty: /root/.ssh may not exist.
+value: PermitRootLogin, AuthorizedKeysCommand, TrustedUserCAKeys backdoors; keys added for root.
+sensitive: yes
+ref: draft-4; draft-23.4 no.8
+
+[D07-031] FUNC kit 300
+cmd: ssh_user_files
+out: ssh-users
+purpose: Copy ~/.ssh of every account (authorized_keys, known_hosts, config, rc, keys) and list running ssh-agent sockets.
+expect: ssh-users/<user>/... copies plus agents.txt.
+empty: EMPTY when no user has a .ssh folder.
+value: Attacker keys in authorized_keys, pivot targets in known_hosts, ProxyCommand tricks.
+sensitive: yes
+ref: draft-4; UAC:ssh
+
+[D07-032] FUNC kit 300
+cmd: ssh_key_inventory
+out: ssh-keys.tsv
+purpose: Fingerprint every SSH key on the host (host keys, user keys, authorized_keys) with c0f-sshkey: type, bits, SHA256/MD5, passphrase or not, options.
+expect: TSV, one row per key line.
+empty: Never empty when sshd is installed.
+value: Matches 'Accepted publickey ... SHA256:...' log lines to a key and an owner; finds keys without passphrase (UAC check).
+sensitive: yes
+ref: draft-26.4; UAC:private_keys_with_null_passphrases
+
+[D07-033] CMD server 60
+cmd: srv sshd -T 2>&1
+out: sshd-effective-config.txt
+req: has sshd
+purpose: Effective sshd configuration after includes and defaults.
+expect: Lower-case key value list.
+empty: Not applicable without sshd.
+value: Shows settings that come from Include files or Match blocks.
+ref: man:sshd(8)
+
+[D07-034] FUNC kit 60
+cmd: rhosts_check
+out: rhosts.txt
+purpose: List and copy .rhosts, .shosts, hosts.equiv and shosts.equiv files.
+expect: Usually nothing.
+empty: Empty is normal.
+value: Legacy trust files give password-less access.
+sensitive: yes
+ref: UAC:rhosts
+
+[D07-035] COPY kit 60
+cmd: -R /var/lib/sudo/lectured /var/db/sudo/lectured /var/log/sudo-io /var/log/sudo.log /var/log/sudo-logsrvd
+purpose: sudo 'lectured' markers (users who ran sudo at least once) and sudo I/O logs.
+expect: One file per user who used sudo; I/O log folders when enabled.
+empty: NOT_FOUND when unused.
+value: Which accounts used sudo and when (file times); full session recordings when I/O logging is on.
+ref: UAC:sudo_lectured

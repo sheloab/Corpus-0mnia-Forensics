@@ -1,0 +1,161 @@
+# D06 firewall and hardening
+@phase 1000
+[D06-001] CMD kit 60
+cmd: xtables-legacy-multi iptables-save -c 2>&1; echo '#### ip6tables (legacy)'; xtables-legacy-multi ip6tables-save -c 2>&1
+out: iptables-legacy-save.txt
+purpose: iptables/ip6tables rules with packet counters, legacy backend.
+expect: *filter/*nat/*mangle/*raw tables with rules and counters, or nothing when legacy is unused.
+empty: Empty when the host uses the nft backend.
+value: Rules opening backdoor ports, redirecting or hiding traffic; counters show which rules were hit.
+ref: draft-13.10; draft-37.3 no.37
+
+[D06-002] CMD kit 60
+cmd: xtables-nft-multi iptables-save -c 2>&1; echo '#### ip6tables (nft)'; xtables-nft-multi ip6tables-save -c 2>&1; echo '#### arptables'; xtables-nft-multi arptables-save 2>&1; echo '#### ebtables'; xtables-nft-multi ebtables-save 2>&1
+out: iptables-nft-save.txt
+purpose: iptables/ip6tables/arptables/ebtables rules via the nft backend.
+expect: Tables and rules created through iptables-nft.
+empty: Empty when the legacy backend is used.
+value: Same as above for systems using iptables-nft (Debian 10+, RHEL 8+).
+ref: draft-13.10
+
+[D06-003] CMD kit 60
+cmd: nft -a list ruleset 2>&1
+out: nft-ruleset.txt
+purpose: Complete nftables ruleset with rule handles.
+expect: table/chain/rule blocks (firewalld, docker and kube-proxy tables appear here too).
+empty: Empty when no nft rules exist.
+value: Hidden accept rules, NAT redirections, sets of attacker IPs.
+ref: man:nft(8)
+
+[D06-004] CMD kit 60
+cmd: ipset list 2>&1
+out: ipset.txt
+purpose: Contents of all IP sets.
+expect: Set headers and members.
+empty: Empty when ipset is not used.
+value: Allow/deny lists referenced by firewall rules (fail2ban, CSF).
+ref: draft-23.3
+
+[D06-005] CMD server 30
+cmd: srv ufw status verbose 2>&1; echo; srv ufw show added 2>&1
+out: ufw-status.txt
+req: has ufw
+purpose: UFW status and rules as UFW sees them.
+expect: Status active/inactive, default policies, rule list.
+empty: Not applicable without ufw.
+value: Rules added by an attacker; inactive firewall.
+ref: draft-13.10
+
+[D06-006] CMD server 60
+cmd: srv firewall-cmd --state 2>&1; srv firewall-cmd --get-active-zones 2>&1; srv firewall-cmd --list-all-zones 2>&1; srv firewall-cmd --direct --get-all-rules 2>&1
+out: firewalld.txt
+req: has firewall-cmd
+purpose: firewalld runtime zones, services, ports, rich and direct rules.
+expect: Zone blocks with interfaces, services, ports.
+empty: Not applicable without firewalld.
+value: Ports/services opened at runtime but not in permanent config.
+ref: draft-13.10
+
+[D06-007] COPY kit 120
+cmd: -R /etc/ufw /etc/firewalld /etc/sysconfig/iptables /etc/sysconfig/ip6tables /etc/sysconfig/iptables-config /etc/iptables /etc/nftables.conf /etc/nftables.d /etc/sysconfig/nftables.conf /etc/csf /etc/shorewall /etc/shorewall6 /etc/ferm /etc/arno-iptables-firewall /etc/knockd.conf /etc/default/ufw /etc/ipset.conf /etc/sysconfig/ipset
+purpose: Persistent firewall configuration of every common firewall front-end.
+expect: Rule files of the firewall in use.
+empty: NOT_FOUND for front-ends that are not installed.
+value: Difference between persistent config and runtime rules; port knocking config.
+ref: draft-13.10
+
+[D06-008] FUNC mixed 120
+cmd: fail2ban_state
+out: fail2ban
+req: has fail2ban-client || [ -d /etc/fail2ban ]
+purpose: fail2ban jails, banned IPs and configuration; CrowdSec decisions when present.
+expect: Jail list and per-jail banned IPs; cscli decisions.
+empty: Not applicable without fail2ban/CrowdSec.
+value: Attacker IPs already seen by the host; disabled jails.
+ref: draft-13.10
+
+[D06-009] COPY kit 60
+cmd: -R /etc/fail2ban /var/lib/fail2ban /etc/crowdsec /var/lib/crowdsec/data/crowdsec.db
+purpose: fail2ban and CrowdSec configuration and databases.
+expect: jail.conf/jail.local, filters, fail2ban.sqlite3, CrowdSec config.
+empty: NOT_FOUND when not installed.
+value: Ban history including expired bans (sqlite).
+ref: draft-13.10
+
+[D06-010] CMD kit 60
+cmd: sysctl -a 2>/dev/null
+out: sysctl-all.txt
+purpose: All kernel parameters.
+expect: key = value lines.
+empty: Never empty.
+value: Disabled protections (ASLR randomize_va_space, kptr_restrict, dmesg_restrict, ptrace_scope, unprivileged_bpf).
+ref: draft-20.2; UAC:sysctl
+
+[D06-011] COPY kit 60
+cmd: -R /etc/sysctl.conf /etc/sysctl.d /usr/lib/sysctl.d /run/sysctl.d /lib/sysctl.d
+purpose: Persistent kernel parameter files.
+expect: *.conf files.
+empty: Some folders do not exist (NOT_FOUND).
+value: Persistent weakening of kernel protections.
+ref: UAC:sysctl
+
+[D06-012] CMD mixed 30
+cmd: echo "selinuxfs=$(ls -d /sys/fs/selinux 2>/dev/null)"; echo "enforce=$(cat /sys/fs/selinux/enforce 2>/dev/null)"; echo "policyvers=$(cat /sys/fs/selinux/policyvers 2>/dev/null)"; srv getenforce 2>&1; srv sestatus -v 2>&1; srv semodule -l 2>/dev/null | head -n 1000
+out: selinux.txt
+purpose: SELinux mode and policy (from sysfs, plus sestatus/semodule when installed).
+expect: enforce=1 (enforcing), 0 (permissive) or absent; sestatus summary.
+empty: Absent selinuxfs means SELinux is not enabled.
+value: SELinux switched to permissive or custom policy modules added by an attacker.
+ref: draft-13.10
+
+[D06-013] COPY kit 120
+cmd: -R /etc/selinux/config /etc/selinux/semanage.conf /etc/selinux/targeted/active/modules/400 /etc/selinux/targeted/contexts/files/file_contexts.local /var/lib/selinux/targeted/active/modules/400
+purpose: SELinux configuration and locally added policy modules (priority 400).
+expect: config with SELINUX=, local modules.
+empty: NOT_FOUND without SELinux.
+value: Locally added modules and file contexts can whitelist malware.
+ref: draft-13.10
+
+[D06-014] CMD mixed 30
+cmd: echo "apparmor_enabled=$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)"; cat /sys/kernel/security/apparmor/profiles 2>/dev/null; srv aa-status 2>&1
+out: apparmor.txt
+purpose: AppArmor state and loaded profiles with their mode.
+expect: List 'profile (enforce|complain)'.
+empty: Empty when AppArmor is not enabled.
+value: Profiles set to complain or removed for attacked services.
+ref: draft-13.10
+
+[D06-015] COPY kit 60
+cmd: -R /etc/apparmor /etc/apparmor.d
+purpose: AppArmor profiles on disk.
+expect: Profile files.
+empty: NOT_FOUND without AppArmor.
+value: Modified profiles for nginx/sshd/etc.
+ref: draft-13.10
+
+[D06-016] COPY kit 60
+cmd: /etc/hosts.allow /etc/hosts.deny /etc/securetty /etc/security/access.conf /etc/security/limits.conf /etc/security/limits.d /etc/security/faillock.conf /etc/security/pwquality.conf /etc/login.defs /etc/default/useradd
+purpose: TCP wrappers and host access/login policy files.
+expect: allow/deny rules, limits, password policy.
+empty: NOT_FOUND for unused mechanisms.
+value: ALL: ALL in hosts.allow, relaxed login policy.
+ref: draft-13.7
+
+[D06-017] CMD server 60
+cmd: for d in $(ls /sys/class/net); do echo "== $d"; srv tc qdisc show dev "$d" 2>&1; srv tc filter show dev "$d" ingress 2>&1; done
+out: tc-qdisc-filters.txt
+req: has tc
+purpose: Traffic control queues and filters (including eBPF classifiers).
+expect: Default qdiscs; filters usually absent.
+empty: Not applicable without tc.
+value: tc/eBPF filters are a known stealth backdoor channel.
+ref: draft-13.10
+
+[D06-018] CMD kit 30
+cmd: ip -6 addr show 2>&1 | head -n 5; cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null; grep -r '' /proc/sys/net/ipv4/conf/all/ 2>/dev/null
+out: ip-stack-hardening.txt
+purpose: IPv6 enablement and per-interface IPv4 security switches (rp_filter, redirects, source routing).
+expect: Values 0/1 per setting.
+empty: Never empty.
+value: Accepting redirects/source routes eases MITM.
+ref: draft-13.10

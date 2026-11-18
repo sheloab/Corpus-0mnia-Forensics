@@ -1,0 +1,198 @@
+# D05 network (volatile)
+@phase 400
+[D05-001] FUNC kit 30
+cmd: pcap_start
+out: pcap
+opt: PCAP
+purpose: Start a short packet capture on all interfaces in the background (default 60 s, max 200000 packets / 1 GB).
+expect: pcap/capture.pcap and pcap/tcpdump.log after D05-099 stops it.
+empty: Empty capture means no traffic during the window.
+value: Live C2 beacons and connections that a socket snapshot misses.
+changes: Puts interfaces in promiscuous mode for the capture window.
+sensitive: yes
+ref: draft-20.2; man:tcpdump(1)
+
+[D05-002] CMD kit 60
+cmd: ss -tunapeoi 2>&1
+out: ss-all-sockets.txt
+purpose: Every TCP/UDP socket with owning process, timers and TCP info.
+expect: State, Recv-Q, Send-Q, local:port, peer:port, users:(("name",pid=N,fd=N)).
+empty: Never empty on a networked host.
+value: Listening backdoors, established C2 sessions, the process behind each.
+ref: RFC3227; UAC:ss
+
+[D05-003] CMD kit 60
+cmd: ss -xapne 2>&1; echo; ss -0apn 2>&1; echo; ss -wapn 2>&1
+out: ss-unix-packet-raw.txt
+purpose: Unix sockets, packet sockets and raw sockets.
+expect: Unix socket table, packet sockets (sniffers), raw sockets.
+empty: Packet/raw sections are often empty.
+value: Packet sockets = sniffers; raw sockets = custom backdoors (ICMP/knock).
+ref: draft-23.4; UAC:ss
+
+[D05-004] CMD kit 60
+cmd: netstat -anpe 2>&1
+out: netstat.txt
+purpose: Second socket listing with BusyBox netstat (cross-check with ss).
+expect: Proto Recv-Q Send-Q Local Foreign State PID/Program.
+empty: Never empty.
+value: Differences with ss output hint at tampered tools or races.
+ref: UAC:netstat
+
+[D05-005] COPY kit 60
+cmd: /proc/net/tcp /proc/net/tcp6 /proc/net/udp /proc/net/udp6 /proc/net/raw /proc/net/raw6 /proc/net/unix /proc/net/packet /proc/net/arp /proc/net/route /proc/net/ipv6_route /proc/net/dev /proc/net/snmp /proc/net/netstat /proc/net/sockstat /proc/net/igmp /proc/net/nf_conntrack /proc/net/ip_conntrack /proc/net/dev_mcast /proc/net/wireless
+purpose: Raw kernel socket and routing tables.
+expect: Hex address tables exactly as the kernel reports them.
+empty: Some files do not exist on every kernel (NOT_FOUND).
+value: Ground truth for the rootkit cross-check (D23) and offline re-parsing.
+ref: draft-37.3 no.38; man:proc(5)
+
+[D05-006] CMD kit 30
+cmd: ip -d -s addr show 2>&1; echo; ip -d -s link show 2>&1
+out: ip-addr-link.txt
+purpose: Interfaces, addresses, link details and counters.
+expect: lo plus physical/virtual interfaces with IPs, MACs, flags (PROMISC), statistics.
+empty: Never empty.
+value: Unknown tunnels/bridges, PROMISC flag, secondary IPs.
+ref: UAC:ip
+
+[D05-007] CMD kit 30
+cmd: ip rule show 2>&1; echo; ip -6 rule show 2>&1; echo; ip route show table all 2>&1; echo; ip -6 route show table all 2>&1
+out: ip-rules-routes.txt
+purpose: Policy routing rules and all routing tables.
+expect: Default rules (local/main/default) and routes.
+empty: Never empty.
+value: Extra tables/rules used to divert traffic (policy routing backdoors).
+ref: UAC:ip
+
+[D05-008] CMD kit 30
+cmd: ip neigh show 2>&1; echo; ip -6 neigh show 2>&1; echo; arp -an 2>&1
+out: neighbours-arp.txt
+purpose: ARP/NDP neighbour cache.
+expect: IP -> MAC entries with state.
+empty: Small or empty on isolated hosts.
+value: Recent peers on the local network, ARP spoofing traces.
+ref: UAC:arp
+
+[D05-009] CMD kit 30
+cmd: ip tunnel show 2>&1; ip -d link show type vxlan 2>&1; ip -d link show type gre 2>&1; ip xfrm state 2>&1; ip xfrm policy 2>&1; ip netns list 2>&1; bridge link 2>&1; bridge fdb 2>&1 | head -n 500
+out: tunnels-xfrm-bridges.txt
+purpose: Tunnels, IPsec state, network namespaces, bridges.
+expect: Tunnel/xfrm/bridge listings (often empty).
+empty: Empty is normal on simple servers.
+value: Covert tunnels (GRE/VXLAN/IPsec) used for pivoting or exfiltration.
+sensitive: yes
+ref: draft-3
+
+[D05-010] CMD server 20
+cmd: srv wg show all 2>&1
+out: wireguard.txt
+req: has wg || [ -d /sys/module/wireguard ]
+purpose: WireGuard interfaces, peers, endpoints, last handshake.
+expect: interface/peer blocks.
+empty: Not applicable without WireGuard.
+value: Attacker VPN tunnels.
+ref: man:wg(8)
+
+[D05-011] COPY kit 60
+cmd: /etc/resolv.conf /run/systemd/resolve/resolv.conf /run/systemd/resolve/stub-resolv.conf /etc/hosts /etc/host.conf /etc/nsswitch.conf /etc/hostname /etc/networks /etc/gai.conf
+purpose: Name resolution configuration.
+expect: nameserver lines, hosts entries.
+empty: NOT_FOUND for files a distro does not use.
+value: Redirected domains in /etc/hosts, rogue DNS servers.
+ref: draft-13.7; UAC:resolv_conf
+
+[D05-012] CMD server 30
+cmd: srv resolvectl status 2>&1; srv resolvectl statistics 2>&1
+out: resolvectl.txt
+req: has resolvectl
+purpose: systemd-resolved state: DNS servers per link, cache statistics.
+expect: Global and per-link DNS settings.
+empty: Not applicable without systemd-resolved.
+value: Per-interface DNS overrides.
+ref: man:resolvectl(1)
+
+[D05-013] FUNC mixed 60
+cmd: dns_cache_dump
+out: dns-cache
+purpose: Dump DNS caches that exist on the host (systemd-resolved via SIGUSR1 to journal, nscd, dnsmasq stats).
+expect: Cached names when a caching resolver runs.
+empty: EMPTY when no local cache runs.
+value: Domains resolved recently (C2 domains) even if the connection is gone.
+changes: systemd-resolved writes its cache to the journal (one log entry).
+ref: draft-20.2
+
+[D05-014] COPY kit 120
+cmd: -R /etc/network /etc/netplan /etc/NetworkManager /etc/sysconfig/network-scripts /etc/sysconfig/network /etc/systemd/network /etc/wicked /etc/netctl /etc/dhcp /etc/dhcpcd.conf /var/lib/dhcp /var/lib/dhclient /var/lib/NetworkManager /run/NetworkManager /etc/iproute2
+purpose: Network configuration of every network stack (ifupdown, netplan, NetworkManager, RHEL scripts, systemd-networkd).
+expect: Interface definitions, DHCP leases, Wi-Fi/VPN profiles.
+empty: Only the stack in use exists.
+value: Persistent routes/addresses, VPN profiles, DHCP lease history.
+sensitive: yes
+ref: draft-13.6
+
+[D05-015] CMD server 30
+cmd: srv nmcli -t general status 2>&1; srv nmcli -t connection show 2>&1; srv nmcli -t device show 2>&1
+out: nmcli.txt
+req: has nmcli
+purpose: NetworkManager runtime state.
+expect: Connections and devices.
+empty: Not applicable without NetworkManager.
+value: Active VPN or unexpected connections.
+ref: UAC:nmcli
+
+[D05-016] CMD kit 30
+cmd: for i in /sys/class/net/*; do f=$(cat "$i/flags" 2>/dev/null); [ -n "$f" ] && [ $(( f & 0x100 )) -ne 0 ] && echo "PROMISC ${i##*/} flags=$f"; done; echo 'packet sockets (sniffers):'; cat /proc/net/packet
+out: promiscuous-sniffers.txt
+purpose: Interfaces in promiscuous mode and processes with packet sockets.
+expect: Usually no PROMISC line (C0F's own capture can cause one).
+empty: Never empty (header lines).
+value: Sniffers capturing credentials.
+ref: draft-23.4 no.6
+
+[D05-017] CMD kit 30
+cmd: cat /proc/net/nf_conntrack 2>/dev/null | head -n 100000 || echo 'nf_conntrack not available'
+out: conntrack.txt
+purpose: Connection tracking table (recent and current flows seen by netfilter).
+expect: One line per tracked flow.
+empty: Empty when conntrack is not loaded.
+value: Flows that already ended but are still tracked (minutes).
+ref: draft-3
+
+[D05-018] FUNC mixed 60
+cmd: nfs_state
+out: nfs
+purpose: NFS/SMB exports and mounts (exportfs, showmount, nfsstat, /proc/fs/nfsd).
+expect: Export list, client mounts, statistics.
+empty: EMPTY when NFS/SMB are not used.
+value: Data shared out of the host; mounted remote shares.
+ref: UAC:nfsstat; UAC:showmount
+
+[D05-019] COPY kit 60
+cmd: -R /etc/openvpn /etc/ipsec.conf /etc/ipsec.d /etc/strongswan /etc/swanctl /etc/wireguard /etc/xl2tpd /etc/ppp /etc/tinc /etc/zerotier /var/lib/zerotier-one /etc/tailscale /var/lib/tailscale
+purpose: VPN configurations (OpenVPN, IPsec, WireGuard, PPP, tinc, ZeroTier, Tailscale).
+expect: Config/key files for VPNs in use.
+empty: NOT_FOUND when not installed.
+value: Attacker-installed overlay networks for persistence/remote access.
+sensitive: yes
+ref: draft-13.10
+
+[D05-020] CMD kit 30
+cmd: cat /proc/sys/net/ipv4/ip_forward /proc/sys/net/ipv6/conf/all/forwarding 2>&1; sysctl -a 2>/dev/null | grep -E '^net\.'
+out: net-sysctl.txt
+purpose: IP forwarding and all network kernel parameters.
+expect: ip_forward 0/1 and net.* values.
+empty: Never empty.
+value: Forwarding enabled on a non-router = pivot host.
+ref: draft-13.10
+
+@phase 2300
+[D05-099] FUNC kit 300
+cmd: pcap_stop
+out: pcap-stop.txt
+opt: PCAP
+purpose: Stop the background capture started by D05-001 and record its statistics.
+expect: Packets captured/dropped, file size and SHA-256.
+empty: Not applicable when the capture did not start.
+value: Completes the capture evidence.
+ref: draft-20.2

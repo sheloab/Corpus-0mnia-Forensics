@@ -1,0 +1,168 @@
+# D09 services/daemons and D10 software
+@phase 800
+[D09-001] CMD server 60
+cmd: srv systemctl list-units --all --no-pager --no-legend --full 2>&1
+out: systemctl-units.txt
+req: is_systemd
+purpose: All loaded units with load/active/sub state.
+expect: UNIT LOAD ACTIVE SUB DESCRIPTION lines.
+empty: Not applicable without systemd.
+value: Running/failed services, units loaded from unusual paths.
+ref: draft-4a
+
+[D09-002] CMD server 60
+cmd: srv systemctl list-unit-files --no-pager --no-legend 2>&1
+out: systemctl-unit-files.txt
+req: is_systemd
+purpose: Every unit file with enabled/disabled/static/masked state.
+expect: UNIT FILE STATE VENDOR PRESET.
+empty: Not applicable without systemd.
+value: Enabled units that are not vendor-preset; masked security services.
+ref: draft-4a
+
+[D09-003] FUNC server 600
+cmd: systemd_service_details
+out: services-detail
+req: is_systemd
+purpose: For every service: systemctl show (ExecStart, FragmentPath, DropInPaths, MainPID, timestamps, User) and systemctl cat.
+expect: services-detail/<unit>.show.txt and .cat.txt.
+empty: Not applicable without systemd.
+value: Exact command each service runs, since when, from which file and drop-ins.
+ref: draft-4a
+
+[D09-004] DERIVED mixed 900
+cmd: services_table
+out: services.csv
+purpose: Build services.csv: one row per service/daemon with state, start time, main PID, binary, binary SHA-256, user, unit file times (when installed/enabled), owning package, origin.
+expect: CSV with header; one row per service (systemd or init scripts).
+empty: Never empty on a normal host.
+value: Answers 'which daemons run, since when, installed when and from which package or by hand'.
+ref: draft-4a
+
+[D09-005] FUNC kit 120
+cmd: listeners_without_service
+out: listeners-without-service.txt
+purpose: Listening sockets whose process is not part of any service unit / init script.
+expect: Usually only the examiner's tools or nothing.
+empty: Empty is normal.
+value: Backdoor listeners started by hand or by an exploit.
+ref: draft-4a
+
+[D09-006] CMD server 60
+cmd: srv service --status-all 2>&1; srv chkconfig --list 2>&1; srv rc-status -a 2>&1; srv rc-update show -v 2>&1; srv initctl list 2>&1; srv sv status /var/service/* 2>&1
+out: non-systemd-services.txt
+req: ! is_systemd || has service || has chkconfig || has rc-status
+purpose: Service state from SysV/OpenRC/Upstart/runit tools.
+expect: Service status lines from whichever tool exists.
+empty: Sections for missing tools report 'command not found'.
+value: Same as systemd units for non-systemd systems.
+ref: draft-1
+
+[D09-007] CMD server 60
+cmd: srv systemctl --failed --all --no-pager 2>&1; echo; srv systemctl get-default 2>&1; srv runlevel 2>&1
+out: failed-units-target.txt
+req: is_systemd
+purpose: Failed units and default target/runlevel.
+expect: 0 loaded units listed (normal) or failed units; graphical/multi-user target.
+empty: Not applicable without systemd.
+value: Security services that crashed or were stopped.
+ref: UAC:runlevel
+
+@phase 900
+[D10-001] FUNC mixed 900
+cmd: packages_list
+out: packages
+purpose: Installed packages with version, architecture, install time, vendor/packager and signature (dpkg, rpm, apk, pacman, zypper, xbps, portage, nix, ...).
+expect: packages/<manager>-installed.tsv per package manager present.
+empty: Not applicable for systems without a package manager.
+value: Inventory of software and when each package was installed.
+ref: draft-4b
+
+[D10-002] DERIVED mixed 900
+cmd: software_table
+out: software.csv
+purpose: Build software.csv: name, version, arch, install time, last change, how installed (repo/local file/manual), source repo, who installed (when logged).
+expect: CSV, one row per package plus snap/flatpak/pip/npm/gem entries.
+empty: Never empty on a normal host.
+value: One table for 'what is installed, when and from where'.
+ref: draft-4b
+
+[D10-003] COPY kit 1800
+cmd: -R /var/log/dpkg.log* /var/log/apt /var/log/yum.log* /var/log/dnf.log* /var/log/dnf.rpm.log* /var/log/dnf.librepo.log* /var/log/hawkey.log* /var/log/zypp /var/log/zypper.log* /var/log/pacman.log* /var/log/installer /var/log/anaconda /root/anaconda-ks.cfg /root/original-ks.cfg /var/log/apk.log /var/log/xbps* /var/log/emerge.log /var/log/portage
+purpose: Package manager logs (install/upgrade/remove history), installer logs.
+expect: Rotated logs including .gz.
+empty: Only the package manager in use leaves logs (Alpine keeps none).
+value: When and what was installed or REMOVED; yum.log on EL5-7 has no year (inferred from file names/times).
+ref: draft-13.5; draft-yum
+
+[D10-004] COPY kit 1800
+cmd: -R /var/lib/dpkg/status /var/lib/dpkg/status-old /var/lib/dpkg/diversions /var/lib/dpkg/statoverride /var/lib/dpkg/info /var/lib/apt/extended_states /var/lib/rpm /usr/lib/sysimage/rpm /var/lib/yum/history /var/lib/yum/yumdb /var/lib/dnf /usr/lib/sysimage/libdnf5 /usr/lib/sysimage/dnf /lib/apk/db /etc/apk /var/lib/pacman/local /var/lib/zypp /var/db/xbps /var/db/pkg /var/lib/snapd/state.json /var/lib/flatpak/repo/config /var/lib/flatpak/app
+purpose: Raw package databases (dpkg, rpm, yum/dnf/dnf5 history, apk, pacman, zypp, xbps, portage, snapd, flatpak).
+expect: Database files; dnf5 history location varies between distros, so all candidates are copied.
+empty: Only databases of the managers in use.
+value: Re-analysis offline without trusting the server's package tools; history databases hold every transaction with user and command line.
+ref: draft-23.4 no.3; draft-yum
+
+[D10-005] FUNC mixed 600
+cmd: pkg_history
+out: package-history
+purpose: Transaction history: yum/dnf history database read with sqlite3 (copy, read-only) plus the server's yum/dnf history (cache-only), apt history, zypp history, pacman log, snap changes.
+expect: Transactions with id, time, user, command line, actions (Install/Erase/Update...).
+empty: EMPTY when no history exists.
+value: Who installed or removed what and when; differences between DB and tool output indicate tampering.
+ref: draft-13.5; draft-yum
+
+[D10-006] COPY kit 600
+cmd: -R /etc/apt/sources.list /etc/apt/sources.list.d /etc/apt/trusted.gpg /etc/apt/trusted.gpg.d /etc/apt/preferences /etc/apt/preferences.d /etc/apt/auth.conf /etc/apt/auth.conf.d /usr/share/keyrings /etc/yum.conf /etc/yum.repos.d /etc/yum/vars /etc/dnf/dnf.conf /etc/dnf/vars /etc/dnf/protected.d /etc/pki/rpm-gpg /etc/zypp /etc/pacman.conf /etc/pacman.d /etc/apk/repositories /etc/apk/keys /etc/xbps.d /etc/portage/repos.conf
+purpose: Repository definitions and trusted signing keys of every package manager.
+expect: Repo files and GPG keys.
+empty: Only for managers in use.
+value: Foreign repositories and keys, gpgcheck=0, credentials in auth.conf.
+sensitive: yes
+ref: draft-yum; draft-4b
+
+[D10-007] CMD server 60
+cmd: srv rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE}\t%{INSTALLTIME:date}\t%{SUMMARY}\n' 2>&1
+out: rpm-imported-keys.txt
+req: has rpm
+purpose: GPG keys imported into the rpm database, with import time.
+expect: One line per key with packager identity.
+empty: Not applicable on non-rpm systems.
+value: A key imported recently by an attacker allows malicious packages to install silently.
+ref: draft-yum
+
+[D10-008] FUNC mixed 300
+cmd: lang_packages
+out: language-packages
+purpose: Software outside the system package manager: pip (each interpreter, dist-info INSTALLER/direct_url.json), npm global, gem, cargo, go bin, composer, snap, flatpak, AppImage, conda.
+expect: One list per ecosystem.
+empty: EMPTY when none is installed.
+value: Attackers install tools with pip/npm/go; direct_url.json shows installation from a URL or file.
+ref: draft-4b
+
+[D10-009] FUNC kit 1800
+cmd: unpackaged_executables
+out: unpackaged-executables.tsv
+purpose: Executables in system and common folders that no package owns (dpkg/rpm/apk/pacman file lists), with hash, owner, times and ELF type.
+expect: TSV of unowned executables; local admin tools appear here too.
+empty: Empty on clean package-only hosts.
+value: Manually dropped binaries (backdoors, tools) stand out.
+ref: draft-4b
+
+[D10-010] COPY kit 3600
+cmd: -R /var/cache/apt/archives /var/cache/yum /var/cache/dnf /var/cache/zypp/packages /var/cache/pacman/pkg /var/cache/apk /etc/apk/cache /root/.cache/pip
+purpose: Package caches (downloaded packages, including ones already removed).
+expect: *.deb/*.rpm/*.apk/*.pkg.tar.* files.
+empty: Caches are often cleaned.
+value: Proof of a package that was installed and later removed; original files of tampered packages.
+ref: draft-14.12
+
+@phase 2450
+[D10-020] FUNC mixed 7200
+cmd: package_integrity
+out: package-integrity
+purpose: Verify installed files against the package database (dpkg md5sums computed by C0F, rpm -Va, pacman -Qkk, apk audit).
+expect: List of changed files with the type of change (size, mode, hash, owner).
+empty: Empty means no difference (config files usually differ and are marked).
+value: Replaced system binaries (ls, ps, sshd, login) are the classic userland rootkit.
+ref: draft-16; UAC:packages_integrity
